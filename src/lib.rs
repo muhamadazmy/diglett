@@ -1,3 +1,4 @@
+pub mod server;
 pub mod wire;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -12,6 +13,9 @@ pub enum Error {
 
     #[error("received an invalid header")]
     InvalidHeader,
+
+    #[error("received unexpected message kind")]
+    UnexpectedMessageKind,
 
     #[error("io error: {0}")]
     IO(#[from] std::io::Error),

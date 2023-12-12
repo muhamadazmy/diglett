@@ -71,10 +71,16 @@ where
     }
 }
 
+#[derive(Debug)]
 pub enum Control {
+    Ok,
+    Error(String),
+    Register { id: u16, name: String },
+    FinishRegister,
     Close { id: Stream },
 }
 
+#[derive(Debug)]
 pub enum Message {
     Control(Control),
     Payload { id: Stream, data: Vec<u8> },
@@ -83,21 +89,33 @@ pub enum Message {
 
 #[repr(u8)]
 enum Kind {
+    // ack message
+    Ok = 0,
+    // report an error message
+    Error = 1,
+    // register a new stream
+    Register = 2,
+    // finish registration and start serving data
+    FinishRegister = 3,
     // sending a payload
-    Payload = 0,
-    // closing a stream
-    Close = 1,
-    // terminating entire connection
-    Terminate = 2,
+    Payload = 4,
+    // close a stream
+    Close = 5,
+    // terminating and drop connection
+    Terminate = 6,
 }
 
 impl TryFrom<u8> for Kind {
     type Error = &'static str;
-    fn try_from(value: u8) -> std::result::Result<Self, Self::Error> {
+    fn try_from(value: u8) -> std::result::Result<Self, <Self as TryFrom<u8>>::Error> {
         let result = match value {
-            0 => Self::Payload,
-            1 => Self::Close,
-            2 => Self::Terminate,
+            0 => Self::Ok,
+            1 => Self::Error,
+            2 => Self::Register,
+            3 => Self::FinishRegister,
+            4 => Self::Payload,
+            5 => Self::Close,
+            6 => Self::Terminate,
             _ => return Err("invalid header type"),
         };
 
@@ -129,12 +147,8 @@ where
     }
 
     // send a control message to remote side
-    pub async fn control(&mut self, control: Control) -> Result<()> {
-        match control {
-            Control::Close { id } => self.write_header(Kind::Close, id, 0).await?,
-        }
-
-        self.inner.flush().await.map_err(Error::IO)
+    pub async fn control(&mut self, ctl: Control) -> Result<()> {
+        control(&mut self.inner, &mut self.header_buf, ctl).await
     }
 
     /// write data to a specific stream, return number of bytes that
@@ -142,7 +156,7 @@ where
     /// again until all data is written. It's important that if a lock
     /// is acquired that u give a chance for other writers a chance to
     /// do a write as well.
-    pub async fn wirte(&mut self, id: Stream, data: &[u8]) -> Result<usize> {
+    pub async fn write(&mut self, id: Stream, data: &[u8]) -> Result<usize> {
         let data = if data.len() > MAX_PAYLOAD_SIZE {
             &data[..MAX_PAYLOAD_SIZE]
         } else {
@@ -160,21 +174,7 @@ where
 
     /// receive the next message available on the wire
     pub async fn receive(&mut self) -> Result<Message> {
-        let (kind, id, size) = read_header(&mut self.inner, &mut self.header_buf).await?;
-
-        let msg = match kind {
-            Kind::Close => Message::Control(Control::Close { id }),
-            Kind::Terminate => Message::Terminate,
-            Kind::Payload => {
-                self.inner.read_exact(&mut self.data_buf[..size]).await?;
-                Message::Payload {
-                    id,
-                    data: self.data_buf[..size].into(),
-                }
-            }
-        };
-
-        Ok(msg)
+        receive(&mut self.inner, &mut self.header_buf, &mut self.data_buf).await
     }
 }
 
@@ -204,21 +204,7 @@ pub struct ReadHalf {
 impl ReadHalf {
     /// receive the next message available on the wire
     pub async fn receive(&mut self) -> Result<Message> {
-        let (kind, id, size) = read_header(&mut self.inner, &mut self.header_buf).await?;
-
-        let msg = match kind {
-            Kind::Close => Message::Control(Control::Close { id }),
-            Kind::Terminate => Message::Terminate,
-            Kind::Payload => {
-                self.inner.read_exact(&mut self.data_buf[..size]).await?;
-                Message::Payload {
-                    id,
-                    data: self.data_buf[..size].into(),
-                }
-            }
-        };
-
-        Ok(msg)
+        receive(&mut self.inner, &mut self.header_buf, &mut self.data_buf).await
     }
 }
 
@@ -233,12 +219,8 @@ impl WriteHalf {
     }
 
     // send a control message to remote side
-    pub async fn control(&mut self, control: Control) -> Result<()> {
-        match control {
-            Control::Close { id } => self.write_header(Kind::Close, id, 0).await?,
-        }
-
-        self.inner.flush().await.map_err(Error::IO)
+    pub async fn control(&mut self, ctl: Control) -> Result<()> {
+        control(&mut self.inner, &mut self.header_buf, ctl).await
     }
 
     /// write data to a specific stream, return number of bytes that
@@ -246,7 +228,7 @@ impl WriteHalf {
     /// again until all data is written. It's important that if a lock
     /// is acquired that u give a chance for other writers a chance to
     /// do a write as well.
-    pub async fn wirte(&mut self, id: Stream, data: &[u8]) -> Result<usize> {
+    pub async fn write(&mut self, id: Stream, data: &[u8]) -> Result<usize> {
         let data = if data.len() > MAX_PAYLOAD_SIZE {
             &data[..MAX_PAYLOAD_SIZE]
         } else {
@@ -298,10 +280,100 @@ where
     writer.write_all(&buf[..]).await.map_err(Error::IO)
 }
 
+// send a control message to remote side
+async fn control<W>(
+    writer: &mut W,
+    header_buf: &mut [u8; HEADER_SIZE],
+    control: Control,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let payload = match &control {
+        Control::Ok => {
+            write_header(writer, header_buf, Kind::Ok, 0, 0).await?;
+            None
+        }
+        Control::Error(msg) => {
+            let msg = msg.as_bytes();
+            write_header(writer, header_buf, Kind::Error, 0, msg.len() as u16).await?;
+            Some(msg)
+        }
+        Control::Close { id } => {
+            write_header(writer, header_buf, Kind::Close, *id, 0).await?;
+            None
+        }
+        Control::Register { id, name } => {
+            let name = name.as_bytes();
+            write_header(
+                writer,
+                header_buf,
+                Kind::Register,
+                *id as Stream,
+                name.len() as u16,
+            )
+            .await?;
+
+            Some(name)
+        }
+        Control::FinishRegister => {
+            write_header(writer, header_buf, Kind::FinishRegister, 0, 0).await?;
+            None
+        }
+    };
+
+    if let Some(payload) = payload {
+        writer.write_all(payload).await?;
+    }
+
+    writer.flush().await.map_err(Error::IO)
+}
+
+async fn receive<R>(
+    reader: &mut R,
+    header_buf: &mut [u8; HEADER_SIZE],
+    data_buf: &mut [u8; MAX_PAYLOAD_SIZE],
+) -> Result<Message>
+where
+    R: AsyncRead + Unpin,
+{
+    let (kind, id, size) = read_header(reader, header_buf).await?;
+
+    if size != 0 {
+        reader.read_exact(&mut data_buf[..size]).await?;
+    }
+
+    let data = &data_buf[..size];
+
+    let msg = match kind {
+        Kind::Ok => Message::Control(Control::Ok),
+        Kind::Error => Message::Control(Control::Error(String::from_utf8_lossy(data).into_owned())),
+        Kind::Register => {
+            let name = String::from_utf8_lossy(&data).into_owned();
+
+            // TODO: we need to separate registration id from stream id
+            Message::Control(Control::Register {
+                id: id as u16,
+                name: name,
+            })
+        }
+        Kind::FinishRegister => Message::Control(Control::FinishRegister),
+        Kind::Close => Message::Control(Control::Close { id }),
+        Kind::Terminate => Message::Terminate,
+        Kind::Payload => Message::Payload {
+            id,
+            data: data_buf[..size].into(),
+        },
+    };
+
+    Ok(msg)
+}
+
 define_layout!(handshake, BigEndian, {
     magic: u32,
     version: u8,
     key: [u8; constants::PUBLIC_KEY_SIZE],
+    // todo: add token here
 });
 
 define_layout!(header, BigEndian, {
@@ -339,13 +411,22 @@ mod test {
             let mut con = server.accept().await?;
 
             let msg = con.receive().await.unwrap();
-            match msg {
-                Message::Payload { id, data } => {
-                    assert_eq!(id, 20);
-                    assert_eq!(&data, "hello world".as_bytes());
-                }
-                _ => panic!("invalid message"),
-            };
+
+            if let Message::Payload { id, data } = msg {
+                assert_eq!(id, 20);
+                assert_eq!(&data, "hello world".as_bytes());
+            } else {
+                panic!("expected payload message got: {:?}", msg);
+            }
+
+            let msg = con.receive().await.unwrap();
+
+            if let Message::Control(Control::Close { id }) = msg {
+                assert_eq!(id, 20);
+            } else {
+                panic!("expected close message");
+            }
+
             Ok(())
         });
 
@@ -355,7 +436,8 @@ mod test {
         let client = super::Client::new(client);
         let mut con = client.negotiate().await.unwrap();
 
-        con.wirte(20, "hello world".as_bytes()).await.unwrap();
+        con.write(20, "hello world".as_bytes()).await.unwrap();
+        con.control(Control::Close { id: 20 }).await.unwrap();
 
         handler.await.unwrap().unwrap();
     }

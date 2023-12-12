@@ -8,11 +8,17 @@ edition = "2021"
 [lib]
 path="src/lib.rs"
 
+[[bin]]
+name = "diglett"
+path = "src/bins/agent.rs"
+
+[[bin]]
+name = "server"
+path = "src/bins/server.rs"
+
 [dependencies]
 tokio = {version = "1", features=["rt-multi-thread", "macros", "io-util", "net"]}
 binary-layout = "3.2"
 secp256k1 = "0.28"
 thiserror = "1"
-
-# [dev-dependencies]
-# tokio = {version = "1", features=["rt-multi-thread", "macros", "io-util", "fs"]}
+log = "0.4"
