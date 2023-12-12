@@ -1,7 +1,13 @@
 use crate::{Error, Result};
 use binary_layout::prelude::*;
 use secp256k1::constants;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::{
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+        TcpStream,
+    },
+};
 
 const MAGIC: u32 = 0x6469676c;
 const VERSION: u8 = 1;
@@ -119,15 +125,7 @@ where
     }
 
     async fn write_header(&mut self, kind: Kind, id: Stream, size: u16) -> Result<()> {
-        let mut view = header::View::new(&mut self.header_buf);
-        view.kind_mut().write(kind as u8);
-        view.id_mut().write(id);
-        view.size_mut().write(size);
-
-        self.inner
-            .write_all(&self.header_buf)
-            .await
-            .map_err(Error::IO)
+        write_header(&mut self.inner, &mut self.header_buf, kind, id, size).await
     }
 
     // send a control message to remote side
@@ -162,12 +160,7 @@ where
 
     /// receive the next message available on the wire
     pub async fn receive(&mut self) -> Result<Message> {
-        self.inner.read_exact(&mut self.header_buf).await?;
-
-        let view = header::View::new(&self.header_buf);
-        let kind = Kind::try_from(view.kind().read()).map_err(|_| Error::InvalidHeader)?;
-        let id: Stream = view.id().read();
-        let size = view.size().read() as usize;
+        let (kind, id, size) = read_header(&mut self.inner, &mut self.header_buf).await?;
 
         let msg = match kind {
             Kind::Close => Message::Control(Control::Close { id }),
@@ -183,6 +176,126 @@ where
 
         Ok(msg)
     }
+}
+
+impl Connection<TcpStream> {
+    pub fn split(self) -> (ReadHalf, WriteHalf) {
+        let (read, write) = self.inner.into_split();
+        (
+            ReadHalf {
+                inner: read,
+                data_buf: self.data_buf,
+                header_buf: self.header_buf,
+            },
+            WriteHalf {
+                inner: write,
+                header_buf: [0; HEADER_SIZE],
+            },
+        )
+    }
+}
+
+pub struct ReadHalf {
+    inner: OwnedReadHalf,
+    header_buf: [u8; HEADER_SIZE],
+    data_buf: [u8; MAX_PAYLOAD_SIZE],
+}
+
+impl ReadHalf {
+    /// receive the next message available on the wire
+    pub async fn receive(&mut self) -> Result<Message> {
+        let (kind, id, size) = read_header(&mut self.inner, &mut self.header_buf).await?;
+
+        let msg = match kind {
+            Kind::Close => Message::Control(Control::Close { id }),
+            Kind::Terminate => Message::Terminate,
+            Kind::Payload => {
+                self.inner.read_exact(&mut self.data_buf[..size]).await?;
+                Message::Payload {
+                    id,
+                    data: self.data_buf[..size].into(),
+                }
+            }
+        };
+
+        Ok(msg)
+    }
+}
+
+pub struct WriteHalf {
+    inner: OwnedWriteHalf,
+    header_buf: [u8; HEADER_SIZE],
+}
+
+impl WriteHalf {
+    async fn write_header(&mut self, kind: Kind, id: Stream, size: u16) -> Result<()> {
+        write_header(&mut self.inner, &mut self.header_buf, kind, id, size).await
+    }
+
+    // send a control message to remote side
+    pub async fn control(&mut self, control: Control) -> Result<()> {
+        match control {
+            Control::Close { id } => self.write_header(Kind::Close, id, 0).await?,
+        }
+
+        self.inner.flush().await.map_err(Error::IO)
+    }
+
+    /// write data to a specific stream, return number of bytes that
+    /// has been written. The caller need to make sure to call this
+    /// again until all data is written. It's important that if a lock
+    /// is acquired that u give a chance for other writers a chance to
+    /// do a write as well.
+    pub async fn wirte(&mut self, id: Stream, data: &[u8]) -> Result<usize> {
+        let data = if data.len() > MAX_PAYLOAD_SIZE {
+            &data[..MAX_PAYLOAD_SIZE]
+        } else {
+            data
+        };
+
+        self.write_header(Kind::Payload, id, data.len() as u16)
+            .await?;
+
+        self.inner.write_all(data).await?;
+        self.inner.flush().await?;
+
+        Ok(data.len())
+    }
+}
+
+async fn read_header<R>(
+    reader: &mut R,
+    buf: &mut [u8; HEADER_SIZE],
+) -> Result<(Kind, Stream, usize)>
+where
+    R: AsyncRead + Unpin,
+{
+    reader.read_exact(&mut buf[..]).await?;
+
+    let view = header::View::new(&buf[..]);
+    let kind = Kind::try_from(view.kind().read()).map_err(|_| Error::InvalidHeader)?;
+    let id: Stream = view.id().read();
+    let size = view.size().read() as usize;
+
+    Ok((kind, id, size))
+}
+
+async fn write_header<W>(
+    writer: &mut W,
+    buf: &mut [u8; HEADER_SIZE],
+    kind: Kind,
+    id: Stream,
+    size: u16,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut view = header::View::new(&mut buf[..]);
+    view.kind_mut().write(kind as u8);
+    view.id_mut().write(id);
+    view.size_mut().write(size);
+
+    writer.write_all(&buf[..]).await.map_err(Error::IO)
 }
 
 define_layout!(handshake, BigEndian, {
