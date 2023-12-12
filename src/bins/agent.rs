@@ -11,6 +11,9 @@ async fn main() -> Result<()> {
 
     let mut client = client.negotiate().await?;
 
+    println!("handshake completed");
+
+    println!("register 1");
     client
         .control(Control::Register {
             id: 1,
@@ -18,7 +21,8 @@ async fn main() -> Result<()> {
         })
         .await?;
 
-    println!("{:?}", client.receive().await?);
+    println!("reading okay");
+    println!("{:?}", client.read().await?);
     client
         .control(Control::Register {
             id: 2,
@@ -26,7 +30,7 @@ async fn main() -> Result<()> {
         })
         .await?;
 
-    println!("{:?}", client.receive().await?);
+    println!("{:?}", client.read().await?);
     client.control(Control::FinishRegister).await?;
 
     Ok(())

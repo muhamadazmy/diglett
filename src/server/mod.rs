@@ -18,7 +18,7 @@ impl Server {
             // serve one agent
             tokio::spawn(async move {
                 if let Err(err) = handle(socket).await {
-                    log::warn!("failed to handle agent connection: {}", err);
+                    println!("failed to handle agent connection: {}", err);
                 }
             });
         }
@@ -34,16 +34,21 @@ async fn handle(stream: TcpStream) -> Result<()> {
     // and then use the connection to forward traffic from now on
     let mut connection = server.accept().await?;
 
+    // todo: receive authentication token!
+
     let mut registrations = vec![];
-    while let Ok(message) = connection.receive().await {
+    while let Ok(message) = connection.read().await {
         match message {
             Message::Control(Control::Register { id, name }) => {
+                println!("registered: {}: {}", id, name);
                 registrations.push((id, name));
+                println!("sending ok");
                 connection.control(Control::Ok).await?;
             }
             Message::Control(Control::FinishRegister) => break,
-            _ => {
+            all => {
                 // got an unexpected control message
+                println!("unexpected {:?}", all);
                 return Err(crate::Error::UnexpectedMessageKind);
             }
         }
