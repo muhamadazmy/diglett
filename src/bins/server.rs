@@ -3,7 +3,7 @@ use diglett::server::Server;
 #[tokio::main]
 async fn main() {
     simple_logger::SimpleLogger::default()
-        .with_level(log::LevelFilter::Debug)
+        .with_level(log::LevelFilter::Trace)
         .with_utc_timestamps()
         .init()
         .unwrap();

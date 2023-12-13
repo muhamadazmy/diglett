@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, io::ErrorKind, sync::Arc};
 
 use crate::{
     wire::{self, Connection, Control, Message, Stream},
@@ -79,7 +79,7 @@ async fn handle_agent(stream: TcpStream) -> Result<()> {
 
     log::debug!("accepting agent connections over: {:?}", bind.local_addr());
     let registration = &registrations[0];
-    println!("{:?}", registrations);
+    log::trace!("{:?}", registrations);
 
     loop {
         tokio::select! {
@@ -88,6 +88,7 @@ async fn handle_agent(stream: TcpStream) -> Result<()> {
                 break;
             }
             accepted = bind.accept() => {
+                log::trace!("accepted client connection for: {}", registration.1);
                 let (incoming, addr) = match accepted {
                     Ok(accepted) => accepted,
                     Err(err) => {
@@ -109,11 +110,15 @@ async fn handle_agent(stream: TcpStream) -> Result<()> {
                 let mut clients = clients.lock().await;
 
                 let handler = tokio::spawn(async move {
-                    if let Err(err) = downstream(stream_id, down, agent_writer).await {
+                    if let Err(err) = downstream(stream_id, down, Arc::clone(&agent_writer)).await {
                         log::debug!("failed to process down traffic: {}", err);
                     }
+
+                    log::trace!("client connection stream [{}] close read", stream_id);
+
                     // also clean up the client connection completely!
                     clients_drop.lock().await.remove(&stream_id);
+                    let _ = agent_writer.lock().await.control(Control::Close { id: stream_id }).await;
                 });
 
                 clients.insert(
@@ -127,7 +132,7 @@ async fn handle_agent(stream: TcpStream) -> Result<()> {
         };
     }
 
-    log::debug!("todo: clean up");
+    clients.lock().await.clear();
 
     Ok(())
 }
@@ -162,7 +167,11 @@ async fn upstream(
                     if let Some(client) = streams.get_mut(&id) {
                         // received a message for a stream
                         if let Err(err) = client.write.write_all(&data).await {
-                            log::error!("failed to forward traffic up: {}", err);
+                            // this error can happen if the client connection has been closed
+                            if !err.closed() {
+                                log::error!("failed to forward traffic up: {}", err);
+                            }
+                            log::trace!("client connection stream [{}] write close", id);
                             // the socket is probably dead, we probably should drop from map
                             streams.remove(&id);
                         }
@@ -187,12 +196,30 @@ async fn downstream(id: Stream, mut down: OwnedReadHalf, writer: AgentWriter) ->
     let mut buf: [u8; wire::MAX_PAYLOAD_SIZE] = [0; wire::MAX_PAYLOAD_SIZE];
 
     loop {
-        let n = down.read(&mut buf).await?;
+        let n = match down.read(&mut buf).await {
+            Ok(n) => n,
+            Err(err) if err.closed() => return Ok(()),
+            Err(err) => return Err(err.into()),
+        };
+
         if n == 0 {
             // hit end of connection. I have to disconnect!
             return Ok(());
         }
 
         writer.lock().await.write(id, &buf[..n]).await?;
+    }
+}
+
+trait IsClosed {
+    fn closed(&self) -> bool;
+}
+
+impl IsClosed for std::io::Error {
+    fn closed(&self) -> bool {
+        match self.kind() {
+            ErrorKind::BrokenPipe | ErrorKind::ConnectionReset => true,
+            _ => false,
+        }
     }
 }
