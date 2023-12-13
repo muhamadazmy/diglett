@@ -10,6 +10,7 @@ use tokio::{
 };
 
 use self::frame::{Frame, Kind};
+pub use types::{Registration, Stream};
 
 mod frame;
 
@@ -17,7 +18,7 @@ const MAGIC: u32 = 0x6469676c;
 const VERSION: u8 = 1;
 const HANDSHAKE_SIZE: usize = 38;
 
-pub type Stream = u32;
+pub use frame::MAX_PAYLOAD_SIZE;
 
 define_layout!(handshake, BigEndian, {
     magic: u32,
@@ -84,7 +85,7 @@ where
 pub enum Control {
     Ok,
     Error(String),
-    Register { id: u16, name: String },
+    Register { id: Registration, name: String },
     FinishRegister,
     Close { id: Stream },
 }
@@ -133,7 +134,7 @@ where
             },
             Control::Register { id, name } => Frame {
                 kind: Kind::Register,
-                id: *id as u32,
+                id: id.into(),
                 payload: Some(name.as_bytes()),
             },
             Control::FinishRegister => Frame {
@@ -143,7 +144,7 @@ where
             },
             Control::Close { id } => Frame {
                 kind: Kind::Close,
-                id: *id,
+                id: id.into(),
                 payload: None,
             },
         };
@@ -170,7 +171,7 @@ where
             &mut self.header_buf,
             Frame {
                 kind: frame::Kind::Payload,
-                id,
+                id: id.into(),
                 payload: Some(data),
             },
         )
@@ -191,15 +192,15 @@ where
         let msg = match frm.kind {
             Kind::Ok => Message::Control(Control::Ok),
             Kind::Error => Message::Control(Control::Error(frm.payload_into_string())),
-            Kind::Close => Message::Control(Control::Close { id: frm.id }),
+            Kind::Close => Message::Control(Control::Close { id: frm.id.into() }),
             Kind::Register => Message::Control(Control::Register {
-                id: frm.id as u16,
+                id: Registration::from(frm.id as u16),
                 name: frm.payload_into_string(),
             }),
             Kind::FinishRegister => Message::Control(Control::FinishRegister),
             Kind::Terminate => Message::Terminate,
             Kind::Payload => Message::Payload {
-                id: frm.id,
+                id: frm.id.into(),
                 // todo: no copy?
                 data: frm.payload_into_vec(),
             },
@@ -227,6 +228,72 @@ impl Connection<TcpStream> {
     }
 }
 
+mod types {
+    use std::fmt::Display;
+
+    #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
+    pub struct Registration(u16);
+
+    impl From<u16> for Registration {
+        fn from(value: u16) -> Self {
+            Self(value)
+        }
+    }
+
+    impl From<&Registration> for u32 {
+        fn from(value: &Registration) -> Self {
+            value.0 as u32
+        }
+    }
+
+    impl Display for Registration {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
+    pub struct Stream(u32);
+
+    impl Stream {
+        pub fn new(reg: Registration, port: u16) -> Stream {
+            let v = (reg.0 as u32) << 16 | port as u32;
+            Self(v)
+        }
+
+        pub fn registration(&self) -> Registration {
+            Registration((self.0 >> 16) as u16)
+        }
+
+        pub fn port(&self) -> u16 {
+            self.0 as u16
+        }
+    }
+
+    impl From<&Stream> for u32 {
+        fn from(value: &Stream) -> Self {
+            value.0
+        }
+    }
+
+    impl From<Stream> for u32 {
+        fn from(value: Stream) -> Self {
+            value.0
+        }
+    }
+
+    impl From<u32> for Stream {
+        fn from(value: u32) -> Self {
+            Self(value)
+        }
+    }
+
+    impl Display for Stream {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "({}, {})", self.registration(), self.port())
+        }
+    }
+}
 #[cfg(test)]
 mod test {
 
@@ -235,6 +302,14 @@ mod test {
     use crate::Error;
 
     use super::*;
+
+    #[test]
+    fn stream_id() {
+        let id: u32 = 0x11223344;
+        let id = Stream::from(id);
+        assert_eq!(id.registration(), Registration::from(0x1122));
+        assert_eq!(id.port(), 0x3344);
+    }
 
     #[tokio::test]
     async fn test_negotiate() {
@@ -251,7 +326,7 @@ mod test {
             let msg = con.read().await.unwrap();
 
             if let Message::Payload { id, data } = msg {
-                assert_eq!(id, 20);
+                assert_eq!(id, Stream::from(20));
                 assert_eq!(&data, "hello world".as_bytes());
             } else {
                 panic!("expected payload message got: {:?}", msg);
@@ -260,7 +335,7 @@ mod test {
             let msg = con.read().await.unwrap();
 
             if let Message::Control(Control::Close { id }) = msg {
-                assert_eq!(id, 20);
+                assert_eq!(id, Stream::from(20));
             } else {
                 panic!("expected close message");
             }
@@ -282,8 +357,14 @@ mod test {
         let client = super::Client::new(client);
         let mut con = client.negotiate().await.unwrap();
 
-        con.write(20, "hello world".as_bytes()).await.unwrap();
-        con.control(Control::Close { id: 20 }).await.unwrap();
+        con.write(Stream::from(20), "hello world".as_bytes())
+            .await
+            .unwrap();
+        con.control(Control::Close {
+            id: Stream::from(20),
+        })
+        .await
+        .unwrap();
         con.control(Control::Ok).await.unwrap();
 
         handler.await.unwrap().unwrap();

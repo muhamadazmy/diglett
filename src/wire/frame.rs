@@ -49,7 +49,7 @@ impl TryFrom<u8> for Kind {
             4 => Self::Payload,
             5 => Self::Close,
             6 => Self::Terminate,
-            _ => return Err("invalid header type"),
+            _ => return Err("invalid frame type"),
         };
 
         Ok(result)

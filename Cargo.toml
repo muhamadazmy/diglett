@@ -17,8 +17,9 @@ name = "server"
 path = "src/bins/server.rs"
 
 [dependencies]
-tokio = {version = "1", features=["rt-multi-thread", "macros", "io-util", "net"]}
+tokio = {version = "1", features=["rt-multi-thread", "macros", "io-util", "net", "sync"]}
 binary-layout = "3.2"
 secp256k1 = "0.28"
 thiserror = "1"
 log = "0.4"
+simple_logger = "4.3"
