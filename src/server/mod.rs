@@ -21,14 +21,14 @@ pub use auth::AuthorizeAll;
 
 pub struct Server<A>
 where
-    A: Authenticate + Clone,
+    A: Authenticate,
 {
     auth: Arc<A>,
 }
 
 impl<A> Server<A>
 where
-    A: Authenticate + Clone,
+    A: Authenticate,
 {
     pub fn new(auth: A) -> Self {
         Self {
