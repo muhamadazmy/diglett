@@ -36,6 +36,8 @@ pub enum Kind {
     Close = 5,
     // terminating and drop connection
     Terminate = 6,
+    // Login message
+    Login = 7,
 }
 
 impl TryFrom<u8> for Kind {
@@ -49,6 +51,7 @@ impl TryFrom<u8> for Kind {
             4 => Self::Payload,
             5 => Self::Close,
             6 => Self::Terminate,
+            7 => Self::Login,
             _ => return Err("invalid frame type"),
         };
 

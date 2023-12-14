@@ -1,11 +1,14 @@
 use clap::{ArgAction, Parser};
-use diglett::{server::Server, Result};
+use diglett::{
+    server::{AuthorizeAll, Server},
+    Result,
+};
 
 /// diglett gateway agent
 #[derive(Parser, Debug)]
 #[command(author, version = env!("GIT_VERSION"), about, long_about = None)]
 struct Args {
-    #[arg(short, long, default_value_t = String::from("0.0.0.0:20000"))]
+    #[arg(short, long, default_value = "0.0.0.0:20000")]
     listen: String,
 
     /// enable debugging logs
@@ -36,7 +39,7 @@ async fn main() -> Result<()> {
 }
 
 async fn app(args: Args) -> Result<()> {
-    let server = Server::default();
+    let server = Server::new(AuthorizeAll);
 
     server.start(args.listen).await
 }

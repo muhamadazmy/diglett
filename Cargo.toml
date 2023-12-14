@@ -24,6 +24,7 @@ thiserror = "1"
 log = "0.4"
 simple_logger = "4.3"
 clap = {version = "4.4", features=["derive"]}
+async-trait = "0.1"
 
 [build-dependencies]
 git-version = "0.3"

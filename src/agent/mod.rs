@@ -14,6 +14,14 @@ use tokio::{
     task::JoinHandle,
 };
 
+pub async fn login<S: Into<String>>(client: &mut Connection<TcpStream>, token: S) -> Result<()> {
+    // we only expose the possibility to register one name, but this can easily changed
+    // in the future to enable more. but right now we can forward one port per agent
+
+    client.control(Control::Login(token.into())).await?;
+    client.read().await?.ok_or_err()
+}
+
 pub async fn register<S: Into<String>>(client: &mut Connection<TcpStream>, name: S) -> Result<()> {
     // we only expose the possibility to register one name, but this can easily changed
     // in the future to enable more. but right now we can forward one port per agent

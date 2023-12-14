@@ -85,11 +85,18 @@ where
 
 #[derive(Debug)]
 pub enum Control {
+    // An OK control message
     Ok,
+    // An error control message
     Error(String),
+    // A register control message (unique agent id and name of domain)
     Register { id: Registration, name: String },
+    // Tells server that all registrations requests has been provided
     FinishRegister,
+    // Close a 'stream' with that stream id
     Close { id: Stream },
+    // Send login token to server
+    Login(String),
 }
 
 #[derive(Debug)]
@@ -159,6 +166,11 @@ where
                 id: id.into(),
                 payload: None,
             },
+            Control::Login(token) => Frame {
+                kind: Kind::Login,
+                id: 0,
+                payload: Some(token.as_bytes()),
+            },
         };
 
         frame::write(&mut self.inner, &mut self.header_buf, frm).await?;
@@ -221,6 +233,7 @@ where
             }),
             Kind::FinishRegister => Message::Control(Control::FinishRegister),
             Kind::Terminate => Message::Terminate,
+            Kind::Login => Message::Control(Control::Login(frm.payload_into_string())),
             Kind::Payload => Message::Payload {
                 id: frm.id.into(),
                 // todo: no copy?

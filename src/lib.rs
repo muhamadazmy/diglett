@@ -21,6 +21,9 @@ pub enum Error {
     #[error("remote error: {0}")]
     Remote(String),
 
+    #[error("authentication error: {0}")]
+    AuthenticationError(String),
+
     #[error("io error: {0}")]
     IO(#[from] std::io::Error),
 }

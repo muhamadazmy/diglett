@@ -2,7 +2,7 @@ use std::{collections::HashMap, io::ErrorKind, sync::Arc};
 
 use crate::{
     wire::{self, Connection, Control, Message, Stream},
-    Result,
+    Error, Result,
 };
 use tokio::net::{
     tcp::{OwnedReadHalf, OwnedWriteHalf},
@@ -14,18 +14,37 @@ use tokio::{
     task::JoinHandle,
 };
 
-#[derive(Default)]
-pub struct Server {}
+use self::auth::Authenticate;
 
-impl Server {
-    pub async fn start<A: ToSocketAddrs>(self, addr: A) -> Result<()> {
+pub mod auth;
+pub use auth::AuthorizeAll;
+
+pub struct Server<A>
+where
+    A: Authenticate + Clone,
+{
+    auth: Arc<A>,
+}
+
+impl<A> Server<A>
+where
+    A: Authenticate + Clone,
+{
+    pub fn new(auth: A) -> Self {
+        Self {
+            auth: Arc::new(auth),
+        }
+    }
+
+    pub async fn start<D: ToSocketAddrs>(self, addr: D) -> Result<()> {
         let listener = TcpListener::bind(addr).await?;
 
         while let Ok((socket, _)) = listener.accept().await {
             // serve one agent
+            let auth = Arc::clone(&self.auth);
             tokio::spawn(async move {
-                if let Err(err) = handle_agent(socket).await {
-                    log::debug!("failed to handle agent connection: {}", err);
+                if let Err(err) = handle_agent(auth, socket).await {
+                    log::trace!("failed to handle agent connection: {}", err);
                 }
             });
         }
@@ -34,15 +53,37 @@ impl Server {
     }
 }
 
-async fn handle_agent(stream: TcpStream) -> Result<()> {
+async fn handle_agent<A: Authenticate>(auth: Arc<A>, stream: TcpStream) -> Result<()> {
     let server = wire::Server::new(stream);
     // upgrade connection
     // this step accept client negotiation (if correct)
     // and then use the connection to forward traffic from now on
     let mut connection = server.accept().await?;
 
-    // todo: receive authentication token!
+    // 1 - receive login token
+    let token = match connection.read().await? {
+        Message::Control(Control::Login(token)) => token,
+        _ => {
+            connection.error(Error::UnexpectedMessage).await?;
+            return Err(Error::UnexpectedMessage);
+        }
+    };
 
+    // 2 - authenticate the agent
+    let user = match auth.authenticate(&token).await {
+        Ok(user) => user,
+        Err(err) => {
+            connection.error(&err).await?;
+            return Err(err);
+        }
+    };
+
+    // 3- send okay
+    connection.ok().await?;
+
+    // 4- receive all register messages, each successful registration is
+    // followed by an okay from the server.
+    // 5- wait for final finish-registration message
     let mut registrations = vec![];
     while let Ok(message) = connection.read().await {
         match message {
@@ -55,6 +96,24 @@ async fn handle_agent(stream: TcpStream) -> Result<()> {
 
                     return Ok(());
                 }
+
+                // authorize the domain registration
+                match auth.authorize(&user.id, &name).await {
+                    Ok(false) => {
+                        connection
+                            .error("not authorized to use this domain")
+                            .await?;
+
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        connection.error(err).await?;
+
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+
                 registrations.push((id, name));
                 connection.ok().await?;
             }

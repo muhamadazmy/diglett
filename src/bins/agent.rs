@@ -14,8 +14,8 @@ struct Args {
     name: String,
 
     /// authentication token as defined by the server
-    #[arg(short, long)]
-    token: Option<String>,
+    #[arg(short, long, default_value = "")]
+    token: String,
 
     /// enable debugging logs
     #[arg(short, long, action=ArgAction::Count)]
@@ -52,6 +52,7 @@ async fn app(args: Args) -> Result<()> {
 
     let mut client = client.negotiate().await?;
 
+    agent::login(&mut client, args.token).await?;
     agent::register(&mut client, args.name).await?;
     agent::serve(args.backend, client).await?;
 
