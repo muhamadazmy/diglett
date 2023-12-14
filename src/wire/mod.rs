@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use crate::{Error, Result};
 use binary_layout::prelude::*;
 use secp256k1::constants;
@@ -162,6 +164,16 @@ where
         frame::write(&mut self.inner, &mut self.header_buf, frm).await?;
 
         self.inner.flush().await.map_err(Error::IO)
+    }
+
+    /// a shortcut to send an ok control message
+    pub async fn ok(&mut self) -> Result<()> {
+        self.control(Control::Ok).await
+    }
+
+    /// a shortcut to send an err message
+    pub async fn error<D: Display>(&mut self, msg: D) -> Result<()> {
+        self.control(Control::Error(msg.to_string())).await
     }
 
     /// write data to a specific stream, return number of bytes that

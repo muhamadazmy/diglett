@@ -28,7 +28,7 @@ impl Server {
             // serve one agent
             tokio::spawn(async move {
                 if let Err(err) = handle_agent(socket).await {
-                    println!("failed to handle agent connection: {}", err);
+                    log::debug!("failed to handle agent connection: {}", err);
                 }
             });
         }
@@ -50,17 +50,29 @@ async fn handle_agent(stream: TcpStream) -> Result<()> {
     while let Ok(message) = connection.read().await {
         match message {
             Message::Control(Control::Register { id, name }) => {
-                log::debug!("registered: {}: [{}]", id, name);
+                if registrations.len() == 1 {
+                    // we only allow one registration so far
+                    connection
+                        .error("only one name registration is allowed")
+                        .await?;
+
+                    return Ok(());
+                }
                 registrations.push((id, name));
-                connection.control(Control::Ok).await?;
+                connection.ok().await?;
             }
             Message::Control(Control::FinishRegister) => break,
-            all => {
+            _ => {
                 // got an unexpected control message
-                println!("unexpected {:?}", all);
+                connection.error(crate::Error::UnexpectedMessage).await?;
                 return Err(crate::Error::UnexpectedMessage);
             }
         }
+    }
+
+    if registrations.len() != 1 {
+        connection.error("missing name registration").await?;
+        return Ok(());
     }
 
     let (agent_reader, agent_writer) = connection.split();
