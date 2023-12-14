@@ -13,7 +13,7 @@ name = "diglett"
 path = "src/bins/agent.rs"
 
 [[bin]]
-name = "server"
+name = "diglett-server"
 path = "src/bins/server.rs"
 
 [dependencies]
@@ -23,3 +23,7 @@ secp256k1 = "0.28"
 thiserror = "1"
 log = "0.4"
 simple_logger = "4.3"
+clap = {version = "4.4", features=["derive"]}
+
+[build-dependencies]
+git-version = "0.3"

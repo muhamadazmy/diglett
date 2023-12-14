@@ -29,7 +29,7 @@ async fn register_one<S: Into<String>>(
 ) -> Result<()> {
     client
         .control(Control::Register {
-            id: id,
+            id,
             name: name.into(),
         })
         .await?;
@@ -68,7 +68,7 @@ pub async fn serve<A: ToSocketAddrs>(backend: A, server: Connection<TcpStream>) 
 
                         let (up, down) = stream.into_split();
 
-                        let id_copy = id.clone();
+                        let id_copy = id;
                         let server_writer_copy = Arc::clone(&server_writer);
                         let backend_connections_copy = Arc::clone(&backend_connections);
 
@@ -106,7 +106,7 @@ pub async fn serve<A: ToSocketAddrs>(backend: A, server: Connection<TcpStream>) 
                     server_writer
                         .lock()
                         .await
-                        .control(Control::Close { id: id })
+                        .control(Control::Close { id })
                         .await?;
 
                     backend_connections.lock().await.remove(&id);

@@ -14,13 +14,10 @@ use tokio::{
     task::JoinHandle,
 };
 
+#[derive(Default)]
 pub struct Server {}
 
 impl Server {
-    pub fn new() -> Self {
-        Self {}
-    }
-
     pub async fn start<A: ToSocketAddrs>(self, addr: A) -> Result<()> {
         let listener = TcpListener::bind(addr).await?;
 
@@ -137,7 +134,7 @@ async fn handle_agent(stream: TcpStream) -> Result<()> {
                     stream_id,
                     Client {
                         write: up,
-                        handler: handler,
+                        handler,
                     },
                 );
             }
@@ -229,9 +226,9 @@ trait IsClosed {
 
 impl IsClosed for std::io::Error {
     fn closed(&self) -> bool {
-        match self.kind() {
-            ErrorKind::BrokenPipe | ErrorKind::ConnectionReset => true,
-            _ => false,
-        }
+        matches!(
+            self.kind(),
+            ErrorKind::BrokenPipe | ErrorKind::ConnectionReset
+        )
     }
 }
