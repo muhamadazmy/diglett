@@ -14,25 +14,32 @@ use tokio::{
     task::JoinHandle,
 };
 
-use self::auth::Authenticate;
+use self::{auth::Authenticate, register::Registerer};
 
 pub mod auth;
-pub use auth::AuthorizeAll;
+pub mod register;
 
-pub struct Server<A>
+pub use auth::AuthorizeAll;
+pub use register::PrintRegisterer;
+
+pub struct Server<A, R>
 where
     A: Authenticate,
+    R: Registerer,
 {
     auth: Arc<A>,
+    reg: Arc<R>,
 }
 
-impl<A> Server<A>
+impl<A, R> Server<A, R>
 where
     A: Authenticate,
+    R: Registerer,
 {
-    pub fn new(auth: A) -> Self {
+    pub fn new(auth: A, registerer: R) -> Self {
         Self {
             auth: Arc::new(auth),
+            reg: Arc::new(registerer),
         }
     }
 
@@ -42,8 +49,9 @@ where
         while let Ok((socket, _)) = listener.accept().await {
             // serve one agent
             let auth = Arc::clone(&self.auth);
+            let reg = Arc::clone(&self.reg);
             tokio::spawn(async move {
-                if let Err(err) = handle_agent(auth, socket).await {
+                if let Err(err) = handle_agent(auth, reg, socket).await {
                     log::trace!("failed to handle agent connection: {}", err);
                 }
             });
@@ -53,7 +61,11 @@ where
     }
 }
 
-async fn handle_agent<A: Authenticate>(auth: Arc<A>, stream: TcpStream) -> Result<()> {
+async fn handle_agent<A: Authenticate, R: Registerer>(
+    auth: Arc<A>,
+    reg: Arc<R>,
+    stream: TcpStream,
+) -> Result<()> {
     let server = wire::Server::new(stream);
     // upgrade connection
     // this step accept client negotiation (if correct)
@@ -131,6 +143,16 @@ async fn handle_agent<A: Authenticate>(auth: Arc<A>, stream: TcpStream) -> Resul
         return Ok(());
     }
 
+    // assume one registration
+    let bind = TcpListener::bind(("127.0.0.1", 0)).await?;
+
+    log::debug!("accepting agent connections over: {:?}", bind.local_addr());
+    let registration = &registrations[0];
+
+    let registration_handler = reg
+        .register(&registration.1, bind.local_addr()?.port())
+        .await?;
+
     let (agent_reader, agent_writer) = connection.split();
 
     let agent_writer: AgentWriter = Arc::new(Mutex::new(agent_writer));
@@ -141,13 +163,6 @@ async fn handle_agent<A: Authenticate>(auth: Arc<A>, stream: TcpStream) -> Resul
     // start a process that forward all messages received from the agent to their corresponding
     // up streams
     let mut exited = upstream(Arc::clone(&clients), agent_reader).await;
-
-    // assume one registration
-    let bind = TcpListener::bind(("127.0.0.1", 0)).await?;
-
-    log::debug!("accepting agent connections over: {:?}", bind.local_addr());
-    let registration = &registrations[0];
-    log::trace!("{:?}", registrations);
 
     loop {
         tokio::select! {
@@ -202,6 +217,7 @@ async fn handle_agent<A: Authenticate>(auth: Arc<A>, stream: TcpStream) -> Resul
     }
 
     clients.lock().await.clear();
+    drop(registration_handler);
 
     Ok(())
 }

@@ -1,6 +1,6 @@
 use clap::{ArgAction, Parser};
 use diglett::{
-    server::{AuthorizeAll, Server},
+    server::{AuthorizeAll, PrintRegisterer, Server},
     Result,
 };
 
@@ -39,7 +39,7 @@ async fn main() -> Result<()> {
 }
 
 async fn app(args: Args) -> Result<()> {
-    let server = Server::new(AuthorizeAll);
+    let server = Server::new(AuthorizeAll, PrintRegisterer);
 
     server.start(args.listen).await
 }
