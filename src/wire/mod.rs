@@ -97,6 +97,16 @@ pub enum Message {
     Terminate,
 }
 
+impl Message {
+    pub fn ok_or_err(&self) -> Result<()> {
+        match self {
+            Message::Control(Control::Ok) => Ok(()),
+            Message::Control(Control::Error(remote)) => Err(Error::Remote(remote.into())),
+            _ => Err(Error::UnexpectedMessage),
+        }
+    }
+}
+
 pub struct Connection<S> {
     inner: S,
     header_buf: [u8; frame::FRAME_HEADER_SIZE],

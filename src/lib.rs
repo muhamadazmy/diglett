@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod server;
 pub mod wire;
 
@@ -14,8 +15,11 @@ pub enum Error {
     #[error("received an invalid header")]
     InvalidHeader,
 
-    #[error("received unexpected message kind")]
-    UnexpectedMessageKind,
+    #[error("received unexpected message")]
+    UnexpectedMessage,
+
+    #[error("remote error: {0}")]
+    Remote(String),
 
     #[error("io error: {0}")]
     IO(#[from] std::io::Error),

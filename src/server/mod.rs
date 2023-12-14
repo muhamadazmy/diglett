@@ -58,7 +58,7 @@ async fn handle_agent(stream: TcpStream) -> Result<()> {
             all => {
                 // got an unexpected control message
                 println!("unexpected {:?}", all);
-                return Err(crate::Error::UnexpectedMessageKind);
+                return Err(crate::Error::UnexpectedMessage);
             }
         }
     }
