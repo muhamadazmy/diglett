@@ -108,7 +108,7 @@ pub async fn serve<A: ToSocketAddrs>(backend: A, server: Connection<TcpStream>) 
                         .control(Control::Close { id })
                         .await?;
 
-                    backend_connections.lock().await.remove(&id);
+                    connections.remove(&id);
                 }
             }
             Message::Control(Control::Close { id }) => {

@@ -178,6 +178,7 @@ async fn handle_agent<A: Authenticate>(auth: Arc<A>, stream: TcpStream) -> Resul
                 let mut clients = clients.lock().await;
 
                 let handler = tokio::spawn(async move {
+                    log::trace!("staring client [{}] down stream", stream_id);
                     if let Err(err) = downstream(stream_id, down, Arc::clone(&agent_writer)).await {
                         log::debug!("failed to process down traffic: {}", err);
                     }
@@ -234,6 +235,7 @@ async fn upstream(
                     let mut streams = streams.lock().await;
                     if let Some(client) = streams.get_mut(&id) {
                         // received a message for a stream
+                        log::trace!("forwarding [{}] of data from [{}]", data.len(), id);
                         if let Err(err) = client.write.write_all(&data).await {
                             // this error can happen if the client connection has been closed
                             if !err.closed() {
@@ -274,7 +276,7 @@ async fn downstream(id: Stream, mut down: OwnedReadHalf, writer: AgentWriter) ->
             // hit end of connection. I have to disconnect!
             return Ok(());
         }
-
+        log::trace!("forwarding [{}] of data to [{}]", n, id);
         writer.lock().await.write(id, &buf[..n]).await?;
     }
 }
