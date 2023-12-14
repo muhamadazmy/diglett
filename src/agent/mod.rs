@@ -69,34 +69,25 @@ pub async fn serve<A: ToSocketAddrs>(backend: A, server: Connection<TcpStream>) 
                             Ok(stream) => stream,
                             Err(err) => {
                                 log::error!("failed to establish connection to backend: {}", err);
-                                //TODO: we probably need to notify up stream that connection has been rejected
+                                // tell server that connection has been rejected
+                                server_writer
+                                    .lock()
+                                    .await
+                                    .control(Control::Close { id: id })
+                                    .await?;
+
                                 continue;
                             }
                         };
 
                         let (up, down) = stream.into_split();
 
-                        let id_copy = id;
-                        let server_writer_copy = Arc::clone(&server_writer);
-                        let backend_connections_copy = Arc::clone(&backend_connections);
-
-                        let handler = tokio::spawn(async move {
-                            // this starts copy upstream (so from backend connection to server)
-                            if let Err(err) =
-                                upstream(id_copy, up, Arc::clone(&server_writer_copy)).await
-                            {
-                                log::error!("failed to forward data upstream: {}", err);
-                            }
-
-                            let _ = server_writer_copy
-                                .lock()
-                                .await
-                                .control(Control::Close { id: id_copy })
-                                .await;
-
-                            // send a close up stream
-                            backend_connections_copy.lock().await.remove(&id_copy);
-                        });
+                        let handler = make_upstream(
+                            id,
+                            up,
+                            Arc::clone(&server_writer),
+                            Arc::clone(&backend_connections),
+                        );
 
                         let client = BackendClient {
                             writer: down,
@@ -130,6 +121,29 @@ pub async fn serve<A: ToSocketAddrs>(backend: A, server: Connection<TcpStream>) 
     }
 
     Ok(())
+}
+
+fn make_upstream(
+    id: Stream,
+    up: OwnedReadHalf,
+    server_writer: Arc<Mutex<Connection<OwnedWriteHalf>>>,
+    connections: Connections,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        // this starts copy upstream (so from backend connection to server)
+        if let Err(err) = upstream(id, up, Arc::clone(&server_writer)).await {
+            log::error!("failed to forward data upstream: {}", err);
+        }
+
+        let _ = server_writer
+            .lock()
+            .await
+            .control(Control::Close { id })
+            .await;
+
+        // send a close up stream
+        connections.lock().await.remove(&id);
+    })
 }
 
 async fn upstream(
