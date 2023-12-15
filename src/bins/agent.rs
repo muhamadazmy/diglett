@@ -4,7 +4,6 @@ use diglett::{
     wire::{keypair, Client},
     Result,
 };
-use secp256k1::Keypair;
 use tokio::net::TcpStream;
 
 /// diglett gateway agent

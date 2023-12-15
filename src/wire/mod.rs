@@ -60,7 +60,7 @@ where
 
         self.inner.flush().await?;
         // fall into encryption directly or wait for okay?
-        Ok(Connection::new(Encrypted::new(self.inner)))
+        Ok(Connection::new(Encrypted::new(self.inner, self.shared)))
     }
 }
 
@@ -94,7 +94,7 @@ where
         let pk = PublicKey::from_slice(key)?;
         let shared = shared(&self.kp, pk);
 
-        Ok(Connection::new(Encrypted::new(self.inner)))
+        Ok(Connection::new(Encrypted::new(self.inner, shared)))
     }
 }
 

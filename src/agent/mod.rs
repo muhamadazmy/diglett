@@ -85,7 +85,7 @@ pub async fn serve<A: ToSocketAddrs>(
                                 server_writer
                                     .lock()
                                     .await
-                                    .control(Control::Close { id: id })
+                                    .control(Control::Close { id })
                                     .await?;
 
                                 continue;

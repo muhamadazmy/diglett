@@ -1,3 +1,5 @@
+use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
+use chacha20::ChaCha20;
 use secp256k1::{ecdh, rand, Keypair, PublicKey, Secp256k1};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -29,39 +31,82 @@ pub fn shared(kp: &Keypair, pk: PublicKey) -> [u8; SHARED_KEY_LEN] {
 
 pub struct Encrypted<I> {
     inner: I,
+    key: [u8; SHARED_KEY_LEN],
+    cipher: ChaCha20,
 }
 
 impl<I> Encrypted<I> {
-    pub fn new(inner: I) -> Self {
-        Self { inner }
+    pub fn new(inner: I, key: [u8; SHARED_KEY_LEN]) -> Self {
+        let mut k: [u8; 32] = [0; 32];
+        let mut iv: [u8; 12] = [0; 12];
+        k.copy_from_slice(&key[..32]);
+        iv.copy_from_slice(&key[32..44]);
+
+        let cipher = ChaCha20::new(&k.into(), &iv.into());
+
+        Self { inner, key, cipher }
     }
 }
 
 impl<I> AsyncRead for Encrypted<I>
 where
-    I: AsyncRead,
+    I: AsyncRead + Unpin,
 {
     fn poll_read(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        let inner = unsafe { self.map_unchecked_mut(|f| &mut f.inner) };
-        inner.poll_read(cx, buf)
+        let mut this = self.as_mut();
+        let inner = Pin::new(&mut this.inner);
+
+        //let inner = unsafe { self.map_unchecked_mut(|f| &mut f.inner) };
+
+        match inner.poll_read(cx, buf) {
+            Poll::Ready(Ok(())) => {
+                self.get_mut().cipher.apply_keystream(buf.filled_mut());
+                Poll::Ready(Ok(()))
+            }
+            any => any,
+        }
     }
 }
 
 impl<I> AsyncWrite for Encrypted<I>
 where
-    I: AsyncWrite,
+    I: AsyncWrite + Unpin,
 {
     fn poll_write(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, std::io::Error>> {
-        let inner = unsafe { self.map_unchecked_mut(|f| &mut f.inner) };
-        inner.poll_write(cx, buf)
+        let mut this = self.as_mut();
+
+        let cipher = &mut this.cipher;
+        let mut buf = Vec::from(buf);
+        let current = cipher.current_pos::<usize>();
+
+        cipher.apply_keystream(&mut buf);
+        let inner = Pin::new(&mut this.inner);
+
+        match inner.poll_write(cx, &buf) {
+            Poll::Ready(Ok(n)) => {
+                if buf.len() > n {
+                    let written = buf.len() - n;
+                    let cipher = &mut this.cipher;
+                    cipher.seek(current + written);
+                }
+
+                Poll::Ready(Ok(n))
+            }
+            Poll::Pending => {
+                let cipher = &mut this.cipher;
+                cipher.seek(current);
+                Poll::Pending
+            }
+            any => any,
+        }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
@@ -81,7 +126,10 @@ where
 impl Encrypted<TcpStream> {
     pub fn split(self) -> (Encrypted<impl AsyncRead>, Encrypted<impl AsyncWrite>) {
         let (read, write) = self.inner.into_split();
-        (Encrypted::new(read), Encrypted::new(write))
+        (
+            Encrypted::new(read, self.key),
+            Encrypted::new(write, self.key),
+        )
     }
 }
 
