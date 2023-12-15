@@ -5,7 +5,7 @@ use crate::{
     Result,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{
         tcp::{OwnedReadHalf, OwnedWriteHalf},
         TcpStream, ToSocketAddrs,
@@ -123,12 +123,15 @@ pub async fn serve<A: ToSocketAddrs>(backend: A, server: Connection<TcpStream>) 
     Ok(())
 }
 
-fn make_upstream(
+fn make_upstream<W>(
     id: Stream,
     up: OwnedReadHalf,
-    server_writer: Arc<Mutex<Connection<OwnedWriteHalf>>>,
+    server_writer: Arc<Mutex<Connection<W>>>,
     connections: Connections,
-) -> JoinHandle<()> {
+) -> JoinHandle<()>
+where
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     tokio::spawn(async move {
         // this starts copy upstream (so from backend connection to server)
         if let Err(err) = upstream(id, up, Arc::clone(&server_writer)).await {
@@ -146,11 +149,14 @@ fn make_upstream(
     })
 }
 
-async fn upstream(
+async fn upstream<W>(
     id: Stream,
     mut reader: OwnedReadHalf,
-    server_writer: Arc<Mutex<Connection<OwnedWriteHalf>>>,
-) -> Result<()> {
+    server_writer: Arc<Mutex<Connection<W>>>,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
     let mut buf: [u8; wire::MAX_PAYLOAD_SIZE] = [0; wire::MAX_PAYLOAD_SIZE];
     loop {
         let count = reader.read(&mut buf).await?;

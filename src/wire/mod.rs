@@ -5,10 +5,7 @@ use binary_layout::prelude::*;
 use secp256k1::constants;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::{
-        tcp::{OwnedReadHalf, OwnedWriteHalf},
-        TcpStream,
-    },
+    net::TcpStream,
 };
 
 use self::frame::{Frame, Kind};
@@ -26,7 +23,6 @@ define_layout!(handshake, BigEndian, {
     magic: u32,
     version: u8,
     key: [u8; constants::PUBLIC_KEY_SIZE],
-    // todo: add token here
 });
 
 pub struct Client<S> {
@@ -246,7 +242,12 @@ where
 }
 
 impl Connection<TcpStream> {
-    pub fn split(self) -> (Connection<OwnedReadHalf>, Connection<OwnedWriteHalf>) {
+    pub fn split(
+        self,
+    ) -> (
+        Connection<impl AsyncRead + Unpin>,
+        Connection<impl AsyncWrite + Unpin>,
+    ) {
         let (read, write) = self.inner.into_split();
         (
             Connection {

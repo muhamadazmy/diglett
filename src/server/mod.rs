@@ -4,11 +4,14 @@ use crate::{
     wire::{self, Connection, Control, Message, Stream},
     Error, Result,
 };
-use tokio::net::{
-    tcp::{OwnedReadHalf, OwnedWriteHalf},
-    TcpListener, TcpStream, ToSocketAddrs,
+use tokio::{io::AsyncRead, sync::Mutex};
+use tokio::{
+    io::AsyncWrite,
+    net::{
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+        TcpListener, TcpStream, ToSocketAddrs,
+    },
 };
-use tokio::sync::Mutex;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     task::JoinHandle,
@@ -155,7 +158,7 @@ async fn handle_agent<A: Authenticate, R: Registerer>(
 
     let (agent_reader, agent_writer) = connection.split();
 
-    let agent_writer: AgentWriter = Arc::new(Mutex::new(agent_writer));
+    let agent_writer = Arc::new(Mutex::new(agent_writer));
     // up map is a map of streams and their write halfs
     // it's used to write data sent from the agent up
     let clients: Clients = Arc::new(Mutex::new(HashMap::default()));
@@ -222,7 +225,7 @@ async fn handle_agent<A: Authenticate, R: Registerer>(
     Ok(())
 }
 
-type AgentWriter = Arc<Mutex<Connection<OwnedWriteHalf>>>;
+type AgentWriter<W> = Arc<Mutex<Connection<W>>>;
 type Clients = Arc<Mutex<HashMap<Stream, Client>>>;
 
 struct Client {
@@ -237,10 +240,10 @@ impl Drop for Client {
 }
 // upstream de multiplex incoming traffic from the agent to the clients
 // that are connected locally
-async fn upstream(
-    streams: Clients,
-    mut reader: Connection<OwnedReadHalf>,
-) -> tokio::sync::mpsc::Receiver<()> {
+async fn upstream<R>(streams: Clients, mut reader: Connection<R>) -> tokio::sync::mpsc::Receiver<()>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
     let (close, notify) = tokio::sync::mpsc::channel::<()>(1);
 
     tokio::spawn(async move {
@@ -278,7 +281,10 @@ async fn upstream(
     notify
 }
 
-async fn downstream(id: Stream, mut down: OwnedReadHalf, writer: AgentWriter) -> Result<()> {
+async fn downstream<W>(id: Stream, mut down: OwnedReadHalf, writer: AgentWriter<W>) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
     let mut buf: [u8; wire::MAX_PAYLOAD_SIZE] = [0; wire::MAX_PAYLOAD_SIZE];
 
     loop {
