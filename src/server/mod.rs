@@ -59,7 +59,7 @@ where
             let kp = self.kp;
             tokio::spawn(async move {
                 if let Err(err) = handle_agent(kp, auth, reg, socket).await {
-                    log::trace!("failed to handle agent connection: {}", err);
+                    log::error!("failed to handle agent connection: {}", err);
                 }
             });
         }
@@ -252,7 +252,15 @@ where
     let (close, notify) = tokio::sync::mpsc::channel::<()>(1);
 
     tokio::spawn(async move {
-        while let Ok(message) = reader.read().await {
+        loop {
+            let message = match reader.read().await {
+                Ok(message) => message,
+                Err(err) => {
+                    log::error!("failed to read stream from agent: {}", err);
+                    break;
+                }
+            };
+
             match message {
                 Message::Terminate => return,
                 Message::Payload { id, data } => {

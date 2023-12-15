@@ -93,9 +93,14 @@ where
         match inner.poll_write(cx, &buf) {
             Poll::Ready(Ok(n)) => {
                 if buf.len() > n {
-                    let written = buf.len() - n;
+                    // partial write. we need to seek the cipher
                     let cipher = &mut this.cipher;
-                    cipher.seek(current + written);
+                    log::debug!(
+                        "partial write, seek cipher from {} to {}",
+                        current,
+                        current + n
+                    );
+                    cipher.seek(current + n);
                 }
 
                 Poll::Ready(Ok(n))
@@ -135,6 +140,7 @@ impl Encrypted<TcpStream> {
 
 #[cfg(test)]
 mod test {
+
     use super::*;
 
     #[test]
@@ -146,5 +152,41 @@ mod test {
         let client_key = shared(&client_kp, server_kp.public_key());
 
         assert_eq!(server_key, client_key);
+    }
+
+    #[tokio::test]
+    async fn encryption() {
+        use rand::Rng;
+        use sha2::Digest;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let key: [u8; SHARED_KEY_LEN] = [0x42; SHARED_KEY_LEN];
+        let f = tokio::fs::File::create("/tmp/encrypted.test")
+            .await
+            .unwrap();
+
+        let mut rng = rand::thread_rng();
+        let mut buf: [u8; u16::MAX as usize] = [0; u16::MAX as usize];
+
+        let mut sha = sha2::Sha256::new();
+        let mut enc = Encrypted::new(f, key);
+        for _ in 0..200 {
+            rng.fill(&mut buf[..]);
+            sha.update(&buf[..]);
+            enc.write_all(&buf).await.unwrap();
+        }
+
+        let h1 = sha.finalize();
+
+        let f = tokio::fs::File::open("/tmp/encrypted.test").await.unwrap();
+        let mut sha = sha2::Sha256::new();
+        let mut enc = Encrypted::new(f, key);
+        for _ in 0..200 {
+            enc.read_exact(&mut buf[..]).await.unwrap();
+            sha.update(&buf);
+        }
+
+        let h2 = sha.finalize();
+
+        assert_eq!(h1, h2);
     }
 }

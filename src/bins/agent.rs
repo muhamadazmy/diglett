@@ -51,10 +51,8 @@ async fn main() -> Result<()> {
 }
 
 async fn app(args: Args) -> Result<()> {
-    let server = keypair();
-
     let connection = TcpStream::connect(args.gateway).await?;
-    let client = Client::new(connection, keypair(), server.public_key());
+    let client = Client::new(connection, keypair());
 
     let mut client = client.negotiate().await?;
 

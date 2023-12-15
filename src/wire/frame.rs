@@ -4,6 +4,10 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{Error, Result};
 
+const MAGIC: u32 = 0x6469676c;
+const VERSION: u8 = 1;
+
+pub const HANDSHAKE_SIZE: usize = 38;
 pub const FRAME_HEADER_SIZE: usize = 7;
 pub const MAX_PAYLOAD_SIZE: usize = u16::MAX as usize;
 
@@ -13,6 +17,50 @@ define_layout!(handshake, BigEndian, {
     key: [u8; constants::PUBLIC_KEY_SIZE],
     // todo: add token here
 });
+
+pub async fn write_handshake<W>(
+    writer: &mut W,
+    buf: &mut [u8; HANDSHAKE_SIZE],
+    key: [u8; constants::PUBLIC_KEY_SIZE],
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut view = handshake::View::new(&mut buf[..]);
+
+    view.magic_mut().write(MAGIC);
+    view.version_mut().write(VERSION);
+    view.key_mut().copy_from_slice(&key);
+    writer.write_all(&buf[..]).await?;
+
+    writer.flush().await.map_err(Error::IO)
+}
+
+pub async fn read_handshake<'a, R>(
+    reader: &mut R,
+    buf: &'a mut [u8; HANDSHAKE_SIZE],
+) -> Result<[u8; constants::PUBLIC_KEY_SIZE]>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut key: [u8; constants::PUBLIC_KEY_SIZE] = [0; constants::PUBLIC_KEY_SIZE];
+
+    reader.read_exact(&mut buf[..HANDSHAKE_SIZE]).await?;
+    let view = handshake::View::new(&buf[..HANDSHAKE_SIZE]);
+
+    if view.magic().read() != MAGIC {
+        return Err(Error::InvalidMagic);
+    }
+
+    let version = view.version().read();
+    if version != VERSION {
+        return Err(Error::InvalidVersion(version));
+    }
+
+    key.copy_from_slice(view.key());
+
+    Ok(key)
+}
 
 define_layout!(frame, BigEndian, {
     kind: u8,

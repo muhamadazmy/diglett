@@ -4,7 +4,7 @@ use crate::{Error, Result};
 use binary_layout::prelude::*;
 use secp256k1::{constants, Keypair, PublicKey};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
 };
 
@@ -17,10 +17,6 @@ pub use types::{Registration, Stream};
 mod encrypt;
 mod frame;
 
-const MAGIC: u32 = 0x6469676c;
-const VERSION: u8 = 1;
-const HANDSHAKE_SIZE: usize = 38;
-
 pub use encrypt::{keypair, Encrypted};
 pub use frame::MAX_PAYLOAD_SIZE;
 
@@ -32,35 +28,31 @@ define_layout!(handshake, BigEndian, {
 
 pub struct Client<S> {
     inner: S,
-    pk: PublicKey,
-    shared: [u8; encrypt::SHARED_KEY_LEN],
+    kp: Keypair,
 }
 
 impl<S> Client<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    pub fn new(stream: S, kp: Keypair, server_pk: PublicKey) -> Self {
-        let shared = encrypt::shared(&kp, server_pk);
-        Client {
-            inner: stream,
-            pk: kp.public_key(),
-            shared,
-        }
+    pub fn new(stream: S, kp: Keypair) -> Self {
+        Client { inner: stream, kp }
     }
 
     pub async fn negotiate(mut self) -> Result<Connection<Encrypted<S>>> {
-        let mut buf: [u8; HANDSHAKE_SIZE] = [0; HANDSHAKE_SIZE];
-        let mut view = handshake::View::new(&mut buf);
+        let mut buf: [u8; frame::HANDSHAKE_SIZE] = [0; frame::HANDSHAKE_SIZE];
 
-        view.magic_mut().write(MAGIC);
-        view.version_mut().write(VERSION);
-        view.key_mut().copy_from_slice(&self.pk.serialize());
-        self.inner.write_all(&buf).await?;
+        // send the handshake request with self public key
+        frame::write_handshake(&mut self.inner, &mut buf, self.kp.public_key().serialize()).await?;
 
-        self.inner.flush().await?;
-        // fall into encryption directly or wait for okay?
-        Ok(Connection::new(Encrypted::new(self.inner, self.shared)))
+        // read the server handshake and extract public key of server
+        let server_pk =
+            PublicKey::from_slice(&frame::read_handshake(&mut self.inner, &mut buf).await?)?;
+
+        // compute shared
+        let shared = encrypt::shared(&self.kp, server_pk);
+
+        Ok(Connection::new(Encrypted::new(self.inner, shared)))
     }
 }
 
@@ -78,21 +70,17 @@ where
     }
 
     pub async fn accept(mut self) -> Result<Connection<Encrypted<S>>> {
-        let mut buf: [u8; HANDSHAKE_SIZE] = [0; HANDSHAKE_SIZE];
-        self.inner.read_exact(&mut buf).await?;
-        let view = handshake::View::new(&buf);
-        if view.magic().read() != MAGIC {
-            return Err(Error::InvalidMagic);
-        }
+        let mut buf: [u8; frame::HANDSHAKE_SIZE] = [0; frame::HANDSHAKE_SIZE];
 
-        let version = view.version().read();
-        if version != VERSION {
-            return Err(Error::InvalidVersion(version));
-        }
+        // read client handshake request and extract client public key
+        let client_pk =
+            PublicKey::from_slice(&frame::read_handshake(&mut self.inner, &mut buf).await?)?;
 
-        let key = view.key();
-        let pk = PublicKey::from_slice(key)?;
-        let shared = shared(&self.kp, pk);
+        // send server handshake request with self public key
+        frame::write_handshake(&mut self.inner, &mut buf, self.kp.public_key().serialize()).await?;
+
+        // compute shared
+        let shared = shared(&self.kp, client_pk);
 
         Ok(Connection::new(Encrypted::new(self.inner, shared)))
     }
@@ -435,7 +423,7 @@ mod test {
         let client = tokio::net::TcpStream::connect(("127.0.0.1", local.port()))
             .await
             .unwrap();
-        let client = super::Client::new(client, client_key, server_key.public_key());
+        let client = super::Client::new(client, client_key);
         let mut con = client.negotiate().await.unwrap();
 
         con.write(Stream::from(20), "hello world".as_bytes())
