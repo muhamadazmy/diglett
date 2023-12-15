@@ -4,6 +4,8 @@ use crate::{
     wire::{self, Connection, Control, Message, Stream},
     Error, Result,
 };
+use secp256k1::Keypair;
+use sha2::digest::crypto_common::Key;
 use tokio::{io::AsyncRead, sync::Mutex};
 use tokio::{
     io::AsyncWrite,
@@ -30,6 +32,7 @@ where
     A: Authenticate,
     R: Registerer,
 {
+    kp: Keypair,
     auth: Arc<A>,
     reg: Arc<R>,
 }
@@ -39,8 +42,9 @@ where
     A: Authenticate,
     R: Registerer,
 {
-    pub fn new(auth: A, registerer: R) -> Self {
+    pub fn new(kp: Keypair, auth: A, registerer: R) -> Self {
         Self {
+            kp,
             auth: Arc::new(auth),
             reg: Arc::new(registerer),
         }
@@ -53,8 +57,9 @@ where
             // serve one agent
             let auth = Arc::clone(&self.auth);
             let reg = Arc::clone(&self.reg);
+            let kp = self.kp.clone();
             tokio::spawn(async move {
-                if let Err(err) = handle_agent(auth, reg, socket).await {
+                if let Err(err) = handle_agent(kp, auth, reg, socket).await {
                     log::trace!("failed to handle agent connection: {}", err);
                 }
             });
@@ -65,11 +70,12 @@ where
 }
 
 async fn handle_agent<A: Authenticate, R: Registerer>(
+    kp: Keypair,
     auth: Arc<A>,
     reg: Arc<R>,
     stream: TcpStream,
 ) -> Result<()> {
-    let server = wire::Server::new(stream);
+    let server = wire::Server::new(stream, kp);
     // upgrade connection
     // this step accept client negotiation (if correct)
     // and then use the connection to forward traffic from now on

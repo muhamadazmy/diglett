@@ -24,6 +24,9 @@ pub enum Error {
     #[error("authentication error: {0}")]
     AuthenticationError(String),
 
+    #[error("encryption error: {0}")]
+    Encryption(#[from] secp256k1::Error),
+
     #[error("io error: {0}")]
     IO(#[from] std::io::Error),
 }

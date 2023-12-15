@@ -1,11 +1,11 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    wire::{self, Connection, Control, Message, Registration, Stream},
+    wire::{self, Connection, Control, Encrypted, Message, Registration, Stream},
     Result,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{
         tcp::{OwnedReadHalf, OwnedWriteHalf},
         TcpStream, ToSocketAddrs,
@@ -14,7 +14,10 @@ use tokio::{
     task::JoinHandle,
 };
 
-pub async fn login<S: Into<String>>(client: &mut Connection<TcpStream>, token: S) -> Result<()> {
+pub async fn login<T: Into<String>, S>(client: &mut Connection<S>, token: T) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     // we only expose the possibility to register one name, but this can easily changed
     // in the future to enable more. but right now we can forward one port per agent
 
@@ -22,7 +25,10 @@ pub async fn login<S: Into<String>>(client: &mut Connection<TcpStream>, token: S
     client.read().await?.ok_or_err()
 }
 
-pub async fn register<S: Into<String>>(client: &mut Connection<TcpStream>, name: S) -> Result<()> {
+pub async fn register<N: Into<String>, S>(client: &mut Connection<S>, name: N) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     // we only expose the possibility to register one name, but this can easily changed
     // in the future to enable more. but right now we can forward one port per agent
 
@@ -30,11 +36,14 @@ pub async fn register<S: Into<String>>(client: &mut Connection<TcpStream>, name:
     client.control(Control::FinishRegister).await
 }
 
-async fn register_one<S: Into<String>>(
-    client: &mut Connection<TcpStream>,
+async fn register_one<N: Into<String>, S>(
+    client: &mut Connection<S>,
     id: Registration,
-    name: S,
-) -> Result<()> {
+    name: N,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     client
         .control(Control::Register {
             id,
@@ -48,7 +57,10 @@ async fn register_one<S: Into<String>>(
 
 type Connections = Arc<Mutex<HashMap<Stream, BackendClient>>>;
 
-pub async fn serve<A: ToSocketAddrs>(backend: A, server: Connection<TcpStream>) -> Result<()> {
+pub async fn serve<A: ToSocketAddrs>(
+    server: Connection<Encrypted<TcpStream>>,
+    backend: A,
+) -> Result<()> {
     let backend_connections: Connections = Arc::new(Mutex::new(HashMap::default()));
 
     let (mut server_reader, server_writer) = server.split();

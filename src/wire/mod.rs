@@ -2,21 +2,26 @@ use std::fmt::Display;
 
 use crate::{Error, Result};
 use binary_layout::prelude::*;
-use secp256k1::constants;
+use secp256k1::{constants, Keypair, PublicKey};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
 };
 
-use self::frame::{Frame, Kind};
+use self::{
+    encrypt::shared,
+    frame::{Frame, Kind},
+};
 pub use types::{Registration, Stream};
 
+mod encrypt;
 mod frame;
 
 const MAGIC: u32 = 0x6469676c;
 const VERSION: u8 = 1;
 const HANDSHAKE_SIZE: usize = 38;
 
+pub use encrypt::{keypair, Encrypted};
 pub use frame::MAX_PAYLOAD_SIZE;
 
 define_layout!(handshake, BigEndian, {
@@ -27,42 +32,52 @@ define_layout!(handshake, BigEndian, {
 
 pub struct Client<S> {
     inner: S,
+    pk: PublicKey,
+    shared: [u8; encrypt::SHARED_KEY_LEN],
 }
 
 impl<S> Client<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    pub fn new(stream: S) -> Self {
-        Client { inner: stream }
+    pub fn new(stream: S, kp: Keypair, server_pk: PublicKey) -> Self {
+        let shared = encrypt::shared(&kp, server_pk);
+        Client {
+            inner: stream,
+            pk: kp.public_key(),
+            shared,
+        }
     }
 
-    pub async fn negotiate(mut self) -> Result<Connection<S>> {
+    pub async fn negotiate(mut self) -> Result<Connection<Encrypted<S>>> {
         let mut buf: [u8; HANDSHAKE_SIZE] = [0; HANDSHAKE_SIZE];
         let mut view = handshake::View::new(&mut buf);
+
         view.magic_mut().write(MAGIC);
         view.version_mut().write(VERSION);
+        view.key_mut().copy_from_slice(&self.pk.serialize());
         self.inner.write_all(&buf).await?;
 
         self.inner.flush().await?;
         // fall into encryption directly or wait for okay?
-        Ok(Connection::new(self.inner))
+        Ok(Connection::new(Encrypted::new(self.inner)))
     }
 }
 
 pub struct Server<S> {
     inner: S,
+    kp: Keypair,
 }
 
 impl<S> Server<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    pub fn new(stream: S) -> Self {
-        Server { inner: stream }
+    pub fn new(stream: S, kp: Keypair) -> Self {
+        Server { inner: stream, kp }
     }
 
-    pub async fn accept(mut self) -> Result<Connection<S>> {
+    pub async fn accept(mut self) -> Result<Connection<Encrypted<S>>> {
         let mut buf: [u8; HANDSHAKE_SIZE] = [0; HANDSHAKE_SIZE];
         self.inner.read_exact(&mut buf).await?;
         let view = handshake::View::new(&buf);
@@ -75,7 +90,11 @@ where
             return Err(Error::InvalidVersion(version));
         }
 
-        Ok(Connection::new(self.inner))
+        let key = view.key();
+        let pk = PublicKey::from_slice(key)?;
+        let shared = shared(&self.kp, pk);
+
+        Ok(Connection::new(Encrypted::new(self.inner)))
     }
 }
 
@@ -264,6 +283,29 @@ impl Connection<TcpStream> {
     }
 }
 
+impl Connection<Encrypted<TcpStream>> {
+    pub fn split(
+        self,
+    ) -> (
+        Connection<impl AsyncRead + Unpin>,
+        Connection<impl AsyncWrite + Unpin>,
+    ) {
+        let (read, write) = self.inner.split();
+        (
+            Connection {
+                inner: read,
+                data_buf: self.data_buf,
+                header_buf: self.header_buf,
+            },
+            Connection {
+                inner: write,
+                data_buf: [0; frame::MAX_PAYLOAD_SIZE],
+                header_buf: [0; frame::FRAME_HEADER_SIZE],
+            },
+        )
+    }
+}
+
 mod types {
     use std::fmt::Display;
 
@@ -349,6 +391,9 @@ mod test {
 
     #[tokio::test]
     async fn test_negotiate() {
+        let server_key = keypair();
+        let client_key = keypair();
+
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
@@ -356,7 +401,7 @@ mod test {
 
         let handler: JoinHandle<Result<()>> = tokio::spawn(async move {
             let (cl, _) = listener.accept().await.map_err(Error::IO)?;
-            let server = super::Server::new(cl);
+            let server = super::Server::new(cl, server_key);
             let mut con = server.accept().await?;
 
             let msg = con.read().await.unwrap();
@@ -390,7 +435,7 @@ mod test {
         let client = tokio::net::TcpStream::connect(("127.0.0.1", local.port()))
             .await
             .unwrap();
-        let client = super::Client::new(client);
+        let client = super::Client::new(client, client_key, server_key.public_key());
         let mut con = client.negotiate().await.unwrap();
 
         con.write(Stream::from(20), "hello world".as_bytes())
