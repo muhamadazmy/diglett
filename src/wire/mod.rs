@@ -10,7 +10,7 @@ use tokio::{
 
 use self::{
     encrypt::shared,
-    frame::{Frame, Kind},
+    frame::{Frame, FrameStream, Kind},
 };
 pub use types::{Registration, Stream};
 
@@ -39,7 +39,7 @@ where
         Client { inner: stream, kp }
     }
 
-    pub async fn negotiate(mut self) -> Result<Connection<Encrypted<S>>> {
+    pub async fn negotiate(mut self) -> Result<Connection<S>> {
         let mut buf: [u8; frame::HANDSHAKE_SIZE] = [0; frame::HANDSHAKE_SIZE];
 
         // send the handshake request with self public key
@@ -50,9 +50,9 @@ where
             PublicKey::from_slice(&frame::read_handshake(&mut self.inner, &mut buf).await?)?;
 
         // compute shared
-        let shared = encrypt::shared(&self.kp, server_pk);
+        let _shared = encrypt::shared(&self.kp, server_pk);
 
-        Ok(Connection::new(Encrypted::new(self.inner, shared)))
+        Ok(Connection::new(self.inner))
     }
 }
 
@@ -69,7 +69,7 @@ where
         Server { inner: stream, kp }
     }
 
-    pub async fn accept(mut self) -> Result<Connection<Encrypted<S>>> {
+    pub async fn accept(mut self) -> Result<Connection<S>> {
         let mut buf: [u8; frame::HANDSHAKE_SIZE] = [0; frame::HANDSHAKE_SIZE];
 
         // read client handshake request and extract client public key
@@ -80,9 +80,9 @@ where
         frame::write_handshake(&mut self.inner, &mut buf, self.kp.public_key().serialize()).await?;
 
         // compute shared
-        let shared = shared(&self.kp, client_pk);
+        let _shared = shared(&self.kp, client_pk);
 
-        Ok(Connection::new(Encrypted::new(self.inner, shared)))
+        Ok(Connection::new(self.inner))
     }
 }
 
@@ -121,8 +121,7 @@ impl Message {
 
 pub struct Connection<S> {
     inner: S,
-    header_buf: [u8; frame::FRAME_HEADER_SIZE],
-    data_buf: [u8; frame::MAX_PAYLOAD_SIZE],
+    frame: FrameStream,
 }
 
 impl<S> Connection<S> {
@@ -131,8 +130,7 @@ impl<S> Connection<S> {
     fn new(stream: S) -> Self {
         Connection {
             inner: stream,
-            header_buf: [0; frame::FRAME_HEADER_SIZE],
-            data_buf: [0; frame::MAX_PAYLOAD_SIZE],
+            frame: FrameStream::new(),
         }
     }
 }
@@ -176,7 +174,7 @@ where
             },
         };
 
-        frame::write(&mut self.inner, &mut self.header_buf, frm).await?;
+        self.frame.write(&mut self.inner, frm).await?;
 
         self.inner.flush().await.map_err(Error::IO)
     }
@@ -203,16 +201,16 @@ where
             data
         };
 
-        frame::write(
-            &mut self.inner,
-            &mut self.header_buf,
-            Frame {
-                kind: frame::Kind::Payload,
-                id: id.into(),
-                payload: Some(data),
-            },
-        )
-        .await?;
+        self.frame
+            .write(
+                &mut self.inner,
+                Frame {
+                    kind: frame::Kind::Payload,
+                    id: id.into(),
+                    payload: Some(data),
+                },
+            )
+            .await?;
         self.inner.flush().await?;
 
         Ok(data.len())
@@ -224,7 +222,7 @@ where
     S: AsyncRead + Unpin,
 {
     pub async fn read(&mut self) -> Result<Message> {
-        let frm = frame::read(&mut self.inner, &mut self.data_buf).await?;
+        let frm = self.frame.read(&mut self.inner).await?;
 
         let msg = match frm.kind {
             Kind::Ok => Message::Control(Control::Ok),
@@ -259,36 +257,11 @@ impl Connection<TcpStream> {
         (
             Connection {
                 inner: read,
-                data_buf: self.data_buf,
-                header_buf: self.header_buf,
+                frame: self.frame,
             },
             Connection {
                 inner: write,
-                data_buf: [0; frame::MAX_PAYLOAD_SIZE],
-                header_buf: [0; frame::FRAME_HEADER_SIZE],
-            },
-        )
-    }
-}
-
-impl Connection<Encrypted<TcpStream>> {
-    pub fn split(
-        self,
-    ) -> (
-        Connection<impl AsyncRead + Unpin>,
-        Connection<impl AsyncWrite + Unpin>,
-    ) {
-        let (read, write) = self.inner.split();
-        (
-            Connection {
-                inner: read,
-                data_buf: self.data_buf,
-                header_buf: self.header_buf,
-            },
-            Connection {
-                inner: write,
-                data_buf: [0; frame::MAX_PAYLOAD_SIZE],
-                header_buf: [0; frame::FRAME_HEADER_SIZE],
+                frame: FrameStream::new(),
             },
         )
     }

@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    wire::{self, Connection, Control, Encrypted, Message, Registration, Stream},
+    wire::{self, Connection, Control, Message, Registration, Stream},
     Result,
 };
 use tokio::{
@@ -57,10 +57,7 @@ where
 
 type Connections = Arc<Mutex<HashMap<Stream, BackendClient>>>;
 
-pub async fn serve<A: ToSocketAddrs>(
-    server: Connection<Encrypted<TcpStream>>,
-    backend: A,
-) -> Result<()> {
+pub async fn serve<A: ToSocketAddrs>(server: Connection<TcpStream>, backend: A) -> Result<()> {
     let backend_connections: Connections = Arc::new(Mutex::new(HashMap::default()));
 
     let (mut server_reader, server_writer) = server.split();

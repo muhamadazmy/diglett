@@ -129,53 +129,66 @@ impl<'a> Frame<'a> {
     }
 }
 
-pub async fn write<W>(
-    writer: &mut W,
-    buf: &mut [u8; FRAME_HEADER_SIZE],
-    frm: Frame<'_>,
-) -> Result<()>
-where
-    W: AsyncWrite + Unpin,
-{
-    let mut view = frame::View::new(&mut buf[..]);
-    view.kind_mut().write(frm.kind as u8);
-    view.id_mut().write(frm.id);
-    if let Some(data) = frm.payload {
-        view.size_mut().write(data.len() as u16);
-    } else {
-        view.size_mut().write(0);
-    }
-
-    writer.write_all(&buf[..]).await?;
-    if let Some(data) = frm.payload {
-        writer.write_all(data).await?;
-    }
-
-    Ok(())
+pub struct FrameStream {
+    header: [u8; FRAME_HEADER_SIZE],
+    payload: [u8; MAX_PAYLOAD_SIZE],
 }
 
-pub async fn read<'a, R>(reader: &mut R, buf: &'a mut [u8; MAX_PAYLOAD_SIZE]) -> Result<Frame<'a>>
-where
-    R: AsyncRead + Unpin,
-{
-    reader.read_exact(&mut buf[..FRAME_HEADER_SIZE]).await?;
-    let view = frame::View::new(&buf[..FRAME_HEADER_SIZE]);
-    let kind: Kind = view
-        .kind()
-        .read()
-        .try_into()
-        .map_err(|_| Error::InvalidHeader)?;
-    let id = view.id().read();
-    let size = view.size().read() as usize;
+impl FrameStream {
+    pub fn new() -> FrameStream {
+        Self {
+            header: [0; FRAME_HEADER_SIZE],
+            payload: [0; MAX_PAYLOAD_SIZE],
+        }
+    }
 
-    let payload = if size == 0 {
-        None
-    } else {
-        reader.read_exact(&mut buf[..size]).await?;
-        Some(&buf[..size])
-    };
+    pub async fn write<'a, W>(&mut self, writer: &mut W, frm: Frame<'_>) -> Result<()>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        let mut view = frame::View::new(&mut self.header[..]);
+        view.kind_mut().write(frm.kind as u8);
+        view.id_mut().write(frm.id);
+        if let Some(data) = frm.payload {
+            view.size_mut().write(data.len() as u16);
+        } else {
+            view.size_mut().write(0);
+        }
 
-    Ok(Frame { kind, id, payload })
+        writer.write_all(&self.header[..]).await?;
+        if let Some(data) = frm.payload {
+            writer.write_all(data).await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn read<'a, R>(&'a mut self, reader: &mut R) -> Result<Frame<'a>>
+    where
+        R: AsyncRead + Unpin,
+    {
+        reader
+            .read_exact(&mut self.header[..FRAME_HEADER_SIZE])
+            .await?;
+
+        let view = frame::View::new(&self.header[..FRAME_HEADER_SIZE]);
+        let kind: Kind = view
+            .kind()
+            .read()
+            .try_into()
+            .map_err(|_| Error::InvalidHeader)?;
+        let id = view.id().read();
+        let size = view.size().read() as usize;
+
+        let payload = if size == 0 {
+            None
+        } else {
+            reader.read_exact(&mut self.payload[..size]).await?;
+            Some(&self.payload[..size])
+        };
+
+        Ok(Frame { kind, id, payload })
+    }
 }
 
 #[cfg(test)]
