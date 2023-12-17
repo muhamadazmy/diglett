@@ -236,6 +236,10 @@ impl FrameStream {
             write_half: FrameWriterHalf::new(),
         }
     }
+
+    pub fn split(self) -> (FrameReaderHalf, FrameWriterHalf) {
+        (self.read_half, self.write_half)
+    }
 }
 
 #[async_trait::async_trait]

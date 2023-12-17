@@ -1,7 +1,10 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    wire::{self, Connection, Control, Message, Registration, Stream},
+    wire::{
+        self, Connection, Control, FrameReader, FrameStream, FrameWriter, Message, Registration,
+        Stream,
+    },
     Result,
 };
 use tokio::{
@@ -14,9 +17,10 @@ use tokio::{
     task::JoinHandle,
 };
 
-pub async fn login<T: Into<String>, S>(client: &mut Connection<S>, token: T) -> Result<()>
+pub async fn login<T: Into<String>, S, F>(client: &mut Connection<S, F>, token: T) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
+    F: FrameReader + FrameWriter,
 {
     // we only expose the possibility to register one name, but this can easily changed
     // in the future to enable more. but right now we can forward one port per agent
@@ -25,9 +29,10 @@ where
     client.read().await?.ok_or_err()
 }
 
-pub async fn register<N: Into<String>, S>(client: &mut Connection<S>, name: N) -> Result<()>
+pub async fn register<N: Into<String>, S, F>(client: &mut Connection<S, F>, name: N) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
+    F: FrameReader + FrameWriter,
 {
     // we only expose the possibility to register one name, but this can easily changed
     // in the future to enable more. but right now we can forward one port per agent
@@ -36,13 +41,14 @@ where
     client.control(Control::FinishRegister).await
 }
 
-async fn register_one<N: Into<String>, S>(
-    client: &mut Connection<S>,
+async fn register_one<N: Into<String>, S, F>(
+    client: &mut Connection<S, F>,
     id: Registration,
     name: N,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
+    F: FrameReader + FrameWriter,
 {
     client
         .control(Control::Register {
@@ -57,7 +63,10 @@ where
 
 type Connections = Arc<Mutex<HashMap<Stream, BackendClient>>>;
 
-pub async fn serve<A: ToSocketAddrs>(server: Connection<TcpStream>, backend: A) -> Result<()> {
+pub async fn serve<A: ToSocketAddrs>(
+    server: Connection<TcpStream, FrameStream>,
+    backend: A,
+) -> Result<()> {
     let backend_connections: Connections = Arc::new(Mutex::new(HashMap::default()));
 
     let (mut server_reader, server_writer) = server.split();
@@ -132,14 +141,15 @@ pub async fn serve<A: ToSocketAddrs>(server: Connection<TcpStream>, backend: A) 
     Ok(())
 }
 
-fn make_upstream<W>(
+fn make_upstream<W, F>(
     id: Stream,
     up: OwnedReadHalf,
-    server_writer: Arc<Mutex<Connection<W>>>,
+    server_writer: Arc<Mutex<Connection<W, F>>>,
     connections: Connections,
 ) -> JoinHandle<()>
 where
     W: AsyncWrite + Unpin + Send + 'static,
+    F: FrameWriter + Send + 'static,
 {
     tokio::spawn(async move {
         // this starts copy upstream (so from backend connection to server)
@@ -158,13 +168,14 @@ where
     })
 }
 
-async fn upstream<W>(
+async fn upstream<W, F>(
     id: Stream,
     mut reader: OwnedReadHalf,
-    server_writer: Arc<Mutex<Connection<W>>>,
+    server_writer: Arc<Mutex<Connection<W, F>>>,
 ) -> Result<()>
 where
     W: AsyncWrite + Unpin + Send,
+    F: FrameWriter,
 {
     let mut buf: [u8; wire::MAX_PAYLOAD_SIZE] = [0; wire::MAX_PAYLOAD_SIZE];
     loop {

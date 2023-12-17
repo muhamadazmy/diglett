@@ -5,12 +5,15 @@ use binary_layout::prelude::*;
 use secp256k1::{constants, Keypair, PublicKey};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
-    net::TcpStream,
+    net::{
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+        TcpStream,
+    },
 };
 
 use self::{
     encrypt::shared,
-    frame::{Frame, FrameReader, FrameStream, FrameWriter, Kind},
+    frame::{Frame, FrameReaderHalf, FrameWriterHalf, Kind},
 };
 pub use types::{Registration, Stream};
 
@@ -18,7 +21,7 @@ mod encrypt;
 mod frame;
 
 pub use encrypt::{keypair, Encrypted};
-pub use frame::MAX_PAYLOAD_SIZE;
+pub use frame::{FrameReader, FrameStream, FrameWriter, MAX_PAYLOAD_SIZE};
 
 define_layout!(handshake, BigEndian, {
     magic: u32,
@@ -39,7 +42,7 @@ where
         Client { inner: stream, kp }
     }
 
-    pub async fn negotiate(mut self) -> Result<Connection<S>> {
+    pub async fn negotiate(mut self) -> Result<Connection<S, FrameStream>> {
         let mut buf: [u8; frame::HANDSHAKE_SIZE] = [0; frame::HANDSHAKE_SIZE];
 
         // send the handshake request with self public key
@@ -69,7 +72,7 @@ where
         Server { inner: stream, kp }
     }
 
-    pub async fn accept(mut self) -> Result<Connection<S>> {
+    pub async fn accept(mut self) -> Result<Connection<S, FrameStream>> {
         let mut buf: [u8; frame::HANDSHAKE_SIZE] = [0; frame::HANDSHAKE_SIZE];
 
         // read client handshake request and extract client public key
@@ -119,12 +122,12 @@ impl Message {
     }
 }
 
-pub struct Connection<S> {
+pub struct Connection<S, FrameStream> {
     inner: S,
     frame: FrameStream,
 }
 
-impl<S> Connection<S> {
+impl<S> Connection<S, FrameStream> {
     // this is private because only client or server should
     // be able to create it
     fn new(stream: S) -> Self {
@@ -135,9 +138,10 @@ impl<S> Connection<S> {
     }
 }
 
-impl<S> Connection<S>
+impl<S, F> Connection<S, F>
 where
     S: AsyncWrite + Unpin + Send,
+    F: FrameWriter,
 {
     // send a control message to remote side
     pub async fn control(&mut self, ctl: Control) -> Result<()> {
@@ -217,9 +221,10 @@ where
     }
 }
 
-impl<S> Connection<S>
+impl<S, F> Connection<S, F>
 where
     S: AsyncRead + Unpin + Send,
+    F: FrameReader,
 {
     pub async fn read(&mut self) -> Result<Message> {
         let frm = self.frame.read(&mut self.inner).await?;
@@ -246,22 +251,23 @@ where
     }
 }
 
-impl Connection<TcpStream> {
+impl Connection<TcpStream, FrameStream> {
     pub fn split(
         self,
     ) -> (
-        Connection<impl AsyncRead + Unpin>,
-        Connection<impl AsyncWrite + Unpin>,
+        Connection<OwnedReadHalf, FrameReaderHalf>,
+        Connection<OwnedWriteHalf, FrameWriterHalf>,
     ) {
+        let (fread, fwrite) = self.frame.split();
         let (read, write) = self.inner.into_split();
         (
             Connection {
                 inner: read,
-                frame: self.frame,
+                frame: fread,
             },
             Connection {
                 inner: write,
-                frame: FrameStream::new(),
+                frame: fwrite,
             },
         )
     }

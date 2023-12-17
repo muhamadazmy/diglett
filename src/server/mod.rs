@@ -1,7 +1,7 @@
 use std::{collections::HashMap, io::ErrorKind, sync::Arc};
 
 use crate::{
-    wire::{self, Connection, Control, Message, Stream},
+    wire::{self, Connection, Control, FrameReader, FrameWriter, Message, Stream},
     Error, Result,
 };
 use secp256k1::Keypair;
@@ -230,7 +230,7 @@ async fn handle_agent<A: Authenticate, R: Registerer>(
     Ok(())
 }
 
-type AgentWriter<W> = Arc<Mutex<Connection<W>>>;
+type AgentWriter<W, F> = Arc<Mutex<Connection<W, F>>>;
 type Clients = Arc<Mutex<HashMap<Stream, Client>>>;
 
 struct Client {
@@ -245,9 +245,13 @@ impl Drop for Client {
 }
 // upstream de multiplex incoming traffic from the agent to the clients
 // that are connected locally
-async fn upstream<R>(streams: Clients, mut reader: Connection<R>) -> tokio::sync::mpsc::Receiver<()>
+async fn upstream<R, F>(
+    streams: Clients,
+    mut reader: Connection<R, F>,
+) -> tokio::sync::mpsc::Receiver<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
+    F: FrameReader + Send + Sync + 'static,
 {
     let (close, notify) = tokio::sync::mpsc::channel::<()>(1);
 
@@ -294,9 +298,14 @@ where
     notify
 }
 
-async fn downstream<W>(id: Stream, mut down: OwnedReadHalf, writer: AgentWriter<W>) -> Result<()>
+async fn downstream<W, F>(
+    id: Stream,
+    mut down: OwnedReadHalf,
+    writer: AgentWriter<W, F>,
+) -> Result<()>
 where
     W: AsyncWrite + Unpin + Send,
+    F: FrameWriter,
 {
     let mut buf: [u8; wire::MAX_PAYLOAD_SIZE] = [0; wire::MAX_PAYLOAD_SIZE];
 
