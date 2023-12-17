@@ -184,7 +184,11 @@ where
             return Ok(());
         }
 
-        server_writer.lock().await.write(id, &buf[..count]).await?;
+        server_writer
+            .lock()
+            .await
+            .write(id, &mut buf[..count])
+            .await?;
     }
 }
 

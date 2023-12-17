@@ -26,7 +26,7 @@ simple_logger = "4.3"
 clap = {version = "4.4", features=["derive"]}
 async-trait = "0.1"
 sha2 = "0.10"
-chacha20 = "0.9"
+chacha20 = {version = "0.9"}
 
 [build-dependencies]
 git-version = "0.3"

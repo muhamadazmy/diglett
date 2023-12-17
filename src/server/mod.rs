@@ -321,7 +321,7 @@ where
             return Ok(());
         }
         log::trace!("forwarding [{}] of data to [{}]", n, id);
-        writer.lock().await.write(id, &buf[..n]).await?;
+        writer.lock().await.write(id, &mut buf[..n]).await?;
     }
 }
 

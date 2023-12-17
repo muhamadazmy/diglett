@@ -145,7 +145,7 @@ where
 {
     // send a control message to remote side
     pub async fn control(&mut self, ctl: Control) -> Result<()> {
-        let (frm, payload) = match &ctl {
+        let (frm, mut payload) = match ctl {
             Control::Ok => (
                 Frame {
                     kind: Kind::Ok,
@@ -163,7 +163,7 @@ where
             Control::Register { id, name } => (
                 Frame {
                     kind: Kind::Register,
-                    id: id.into(),
+                    id: (&id).into(),
                 },
                 Some(name),
             ),
@@ -191,7 +191,11 @@ where
         };
 
         self.frame
-            .write(&mut self.inner, frm, payload.map(|v| v.as_bytes()))
+            .write(
+                &mut self.inner,
+                frm,
+                payload.as_deref_mut().map(|v| unsafe { v.as_bytes_mut() }),
+            )
             .await?;
 
         self.inner.flush().await.map_err(Error::IO)
@@ -212,9 +216,9 @@ where
     /// again until all data is written. It's important that if a lock
     /// is acquired that u give a chance for other writers a chance to
     /// do a write as well.
-    pub async fn write(&mut self, id: Stream, data: &[u8]) -> Result<usize> {
+    pub async fn write(&mut self, id: Stream, data: &mut [u8]) -> Result<usize> {
         let data = if data.len() > frame::MAX_PAYLOAD_SIZE {
-            &data[..frame::MAX_PAYLOAD_SIZE]
+            &mut data[..frame::MAX_PAYLOAD_SIZE]
         } else {
             data
         };
@@ -433,7 +437,8 @@ mod test {
         let client = super::Client::new(client, client_key);
         let mut con = client.negotiate().await.unwrap();
 
-        con.write(Stream::from(20), "hello world".as_bytes())
+        let mut msg = String::from("hello world");
+        con.write(Stream::from(20), unsafe { msg.as_bytes_mut() })
             .await
             .unwrap();
         con.control(Control::Close {

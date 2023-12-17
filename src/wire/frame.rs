@@ -1,5 +1,5 @@
 use binary_layout::prelude::*;
-use chacha20::ChaCha20;
+use chacha20::{cipher::StreamCipher, ChaCha20};
 use secp256k1::constants;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -121,7 +121,7 @@ pub trait FrameWriter {
         &mut self,
         writer: &mut W,
         frm: Frame,
-        payload: Option<&'_ [u8]>,
+        payload: Option<&'_ mut [u8]>,
     ) -> Result<()>
     where
         W: AsyncWrite + Unpin + Send;
@@ -154,11 +154,13 @@ impl FrameReader for FrameReaderHalf {
     where
         R: AsyncRead + Unpin + Send,
     {
-        reader
-            .read_exact(&mut self.buffer[..FRAME_HEADER_SIZE])
-            .await?;
+        let header = &mut self.buffer[..FRAME_HEADER_SIZE];
+        reader.read_exact(header).await?;
 
-        let view = frame::View::new(&self.buffer[..FRAME_HEADER_SIZE]);
+        // decrypt
+        self.chacha.apply_keystream(header);
+
+        let view = frame::View::new(header);
         let kind: Kind = view
             .kind()
             .read()
@@ -170,8 +172,12 @@ impl FrameReader for FrameReaderHalf {
         let payload = if size == 0 {
             None
         } else {
-            reader.read_exact(&mut self.buffer[..size]).await?;
-            Some(&self.buffer[..size])
+            let data = &mut self.buffer[..size];
+
+            reader.read_exact(data).await?;
+            self.chacha.apply_keystream(data);
+
+            Some(data as &[u8])
         };
 
         Ok((Frame { kind, id }, payload))
@@ -198,7 +204,7 @@ impl FrameWriter for FrameWriterHalf {
         &mut self,
         writer: &mut W,
         frm: Frame,
-        payload: Option<&'_ [u8]>,
+        payload: Option<&'_ mut [u8]>,
     ) -> Result<()>
     where
         W: AsyncWrite + Unpin + Send,
@@ -206,14 +212,17 @@ impl FrameWriter for FrameWriterHalf {
         let mut view = frame::View::new(&mut self.header[..]);
         view.kind_mut().write(frm.kind as u8);
         view.id_mut().write(frm.id);
-        if let Some(data) = payload {
+        if let Some(data) = &payload {
             view.size_mut().write(data.len() as u16);
         } else {
             view.size_mut().write(0);
         }
 
+        // encrypt header
+        self.chacha.apply_keystream(&mut self.header[..]);
         writer.write_all(&self.header[..]).await?;
         if let Some(data) = payload {
+            self.chacha.apply_keystream(data);
             writer.write_all(data).await?;
         }
 
@@ -255,7 +264,7 @@ impl FrameWriter for FrameStream {
         &mut self,
         writer: &mut W,
         frm: Frame,
-        payload: Option<&'_ [u8]>,
+        payload: Option<&'_ mut [u8]>,
     ) -> Result<()>
     where
         W: AsyncWrite + Unpin + Send,
