@@ -145,40 +145,54 @@ where
 {
     // send a control message to remote side
     pub async fn control(&mut self, ctl: Control) -> Result<()> {
-        let frm = match &ctl {
-            Control::Ok => Frame {
-                kind: Kind::Ok,
-                id: 0,
-                payload: None,
-            },
-            Control::Error(msg) => Frame {
-                kind: Kind::Error,
-                id: 0,
-                payload: Some(msg.as_bytes()),
-            },
-            Control::Register { id, name } => Frame {
-                kind: Kind::Register,
-                id: id.into(),
-                payload: Some(name.as_bytes()),
-            },
-            Control::FinishRegister => Frame {
-                kind: Kind::FinishRegister,
-                id: 0,
-                payload: None,
-            },
-            Control::Close { id } => Frame {
-                kind: Kind::Close,
-                id: id.into(),
-                payload: None,
-            },
-            Control::Login(token) => Frame {
-                kind: Kind::Login,
-                id: 0,
-                payload: Some(token.as_bytes()),
-            },
+        let (frm, payload) = match &ctl {
+            Control::Ok => (
+                Frame {
+                    kind: Kind::Ok,
+                    id: 0,
+                },
+                None,
+            ),
+            Control::Error(msg) => (
+                Frame {
+                    kind: Kind::Error,
+                    id: 0,
+                },
+                Some(msg),
+            ),
+            Control::Register { id, name } => (
+                Frame {
+                    kind: Kind::Register,
+                    id: id.into(),
+                },
+                Some(name),
+            ),
+            Control::FinishRegister => (
+                Frame {
+                    kind: Kind::FinishRegister,
+                    id: 0,
+                },
+                None,
+            ),
+            Control::Close { id } => (
+                Frame {
+                    kind: Kind::Close,
+                    id: id.into(),
+                },
+                None,
+            ),
+            Control::Login(token) => (
+                Frame {
+                    kind: Kind::Login,
+                    id: 0,
+                },
+                Some(token),
+            ),
         };
 
-        self.frame.write(&mut self.inner, frm).await?;
+        self.frame
+            .write(&mut self.inner, frm, payload.map(|v| v.as_bytes()))
+            .await?;
 
         self.inner.flush().await.map_err(Error::IO)
     }
@@ -211,8 +225,8 @@ where
                 Frame {
                     kind: frame::Kind::Payload,
                     id: id.into(),
-                    payload: Some(data),
                 },
+                Some(data),
             )
             .await?;
         self.inner.flush().await?;
@@ -227,23 +241,23 @@ where
     F: FrameReader,
 {
     pub async fn read(&mut self) -> Result<Message> {
-        let frm = self.frame.read(&mut self.inner).await?;
+        let (frm, payload) = self.frame.read(&mut self.inner).await?;
 
         let msg = match frm.kind {
             Kind::Ok => Message::Control(Control::Ok),
-            Kind::Error => Message::Control(Control::Error(frm.payload_into_string())),
+            Kind::Error => Message::Control(Control::Error(option_to_str(payload))),
             Kind::Close => Message::Control(Control::Close { id: frm.id.into() }),
             Kind::Register => Message::Control(Control::Register {
                 id: Registration::from(frm.id as u16),
-                name: frm.payload_into_string(),
+                name: option_to_str(payload),
             }),
             Kind::FinishRegister => Message::Control(Control::FinishRegister),
             Kind::Terminate => Message::Terminate,
-            Kind::Login => Message::Control(Control::Login(frm.payload_into_string())),
+            Kind::Login => Message::Control(Control::Login(option_to_str(payload))),
             Kind::Payload => Message::Payload {
                 id: frm.id.into(),
                 // todo: no copy?
-                data: frm.payload_into_vec(),
+                data: option_to_vec(payload),
             },
         };
 
@@ -270,6 +284,20 @@ impl Connection<TcpStream, FrameStream> {
                 frame: fwrite,
             },
         )
+    }
+}
+
+fn option_to_str(opt: Option<&'_ [u8]>) -> String {
+    match opt {
+        None => String::default(),
+        Some(data) => String::from_utf8_lossy(data).into_owned(),
+    }
+}
+
+fn option_to_vec(opt: Option<&'_ [u8]>) -> Vec<u8> {
+    match opt {
+        None => Vec::default(),
+        Some(data) => Vec::from(data),
     }
 }
 

@@ -107,38 +107,42 @@ impl TryFrom<u8> for Kind {
     }
 }
 
-pub struct Frame<'a> {
+pub struct Frame {
     pub kind: Kind,
     pub id: u32,
-    pub payload: Option<&'a [u8]>,
 }
 
-impl<'a> Frame<'a> {
-    pub fn payload_into_string(&self) -> String {
-        match self.payload {
-            None => String::default(),
-            Some(data) => String::from_utf8_lossy(data).into_owned(),
-        }
-    }
+// impl Frame {
+//     pub fn payload_into_string(&self) -> String {
+//         match self.payload {
+//             None => String::default(),
+//             Some(data) => String::from_utf8_lossy(data).into_owned(),
+//         }
+//     }
 
-    pub fn payload_into_vec(&self) -> Vec<u8> {
-        match self.payload {
-            None => Vec::default(),
-            Some(data) => data.into(),
-        }
-    }
-}
+//     pub fn payload_into_vec(&self) -> Vec<u8> {
+//         match self.payload {
+//             None => Vec::default(),
+//             Some(data) => data.into(),
+//         }
+//     }
+// }
 
 #[async_trait::async_trait]
 pub trait FrameWriter {
-    async fn write<W>(&mut self, writer: &mut W, frm: Frame<'_>) -> Result<()>
+    async fn write<W>(
+        &mut self,
+        writer: &mut W,
+        frm: Frame,
+        payload: Option<&'_ [u8]>,
+    ) -> Result<()>
     where
         W: AsyncWrite + Unpin + Send;
 }
 
 #[async_trait::async_trait]
 pub trait FrameReader {
-    async fn read<'a, R>(&'a mut self, reader: &mut R) -> Result<Frame<'a>>
+    async fn read<'a, R>(&'a mut self, reader: &mut R) -> Result<(Frame, Option<&'a [u8]>)>
     where
         R: AsyncRead + Unpin + Send;
 }
@@ -158,7 +162,7 @@ impl FrameReaderHalf {
 
 #[async_trait::async_trait]
 impl FrameReader for FrameReaderHalf {
-    async fn read<'a, R>(&'a mut self, reader: &mut R) -> Result<Frame<'a>>
+    async fn read<'a, R>(&'a mut self, reader: &mut R) -> Result<(Frame, Option<&'a [u8]>)>
     where
         R: AsyncRead + Unpin + Send,
     {
@@ -182,7 +186,7 @@ impl FrameReader for FrameReaderHalf {
             Some(&self.buffer[..size])
         };
 
-        Ok(Frame { kind, id, payload })
+        Ok((Frame { kind, id }, payload))
     }
 }
 
@@ -201,21 +205,26 @@ impl FrameWriterHalf {
 
 #[async_trait::async_trait]
 impl FrameWriter for FrameWriterHalf {
-    async fn write<W>(&mut self, writer: &mut W, frm: Frame<'_>) -> Result<()>
+    async fn write<W>(
+        &mut self,
+        writer: &mut W,
+        frm: Frame,
+        payload: Option<&'_ [u8]>,
+    ) -> Result<()>
     where
         W: AsyncWrite + Unpin + Send,
     {
         let mut view = frame::View::new(&mut self.header[..]);
         view.kind_mut().write(frm.kind as u8);
         view.id_mut().write(frm.id);
-        if let Some(data) = frm.payload {
+        if let Some(data) = payload {
             view.size_mut().write(data.len() as u16);
         } else {
             view.size_mut().write(0);
         }
 
         writer.write_all(&self.header[..]).await?;
-        if let Some(data) = frm.payload {
+        if let Some(data) = payload {
             writer.write_all(data).await?;
         }
 
@@ -244,7 +253,7 @@ impl FrameStream {
 
 #[async_trait::async_trait]
 impl FrameReader for FrameStream {
-    async fn read<'a, R>(&'a mut self, reader: &mut R) -> Result<Frame<'a>>
+    async fn read<'a, R>(&'a mut self, reader: &mut R) -> Result<(Frame, Option<&'a [u8]>)>
     where
         R: AsyncRead + Unpin + Send,
     {
@@ -254,11 +263,16 @@ impl FrameReader for FrameStream {
 
 #[async_trait::async_trait]
 impl FrameWriter for FrameStream {
-    async fn write<W>(&mut self, writer: &mut W, frm: Frame<'_>) -> Result<()>
+    async fn write<W>(
+        &mut self,
+        writer: &mut W,
+        frm: Frame,
+        payload: Option<&'_ [u8]>,
+    ) -> Result<()>
     where
         W: AsyncWrite + Unpin + Send,
     {
-        self.write_half.write(writer, frm).await
+        self.write_half.write(writer, frm, payload).await
     }
 }
 
