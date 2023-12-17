@@ -11,6 +11,8 @@ pub const SHARED_KEY_LEN: usize = 64;
 use sha2::{Digest, Sha512};
 type Hasher = Sha512;
 
+pub type SharedKey = [u8; SHARED_KEY_LEN];
+
 /// generates a random new keypair
 pub fn keypair() -> Keypair {
     let secp = Secp256k1::new();
@@ -19,7 +21,7 @@ pub fn keypair() -> Keypair {
 }
 
 /// generate a shared key from secure key and a public key
-pub fn shared(kp: &Keypair, pk: PublicKey) -> [u8; SHARED_KEY_LEN] {
+pub fn shared(kp: &Keypair, pk: PublicKey) -> SharedKey {
     // we take the x coordinate of the secret point.
     let point = &ecdh::shared_secret_point(&pk, &kp.secret_key());
 
@@ -27,6 +29,15 @@ pub fn shared(kp: &Keypair, pk: PublicKey) -> [u8; SHARED_KEY_LEN] {
     sh.update(point);
 
     sh.finalize().into()
+}
+
+pub fn chacha_from_key(key: &SharedKey) -> ChaCha20 {
+    let mut k: [u8; 32] = [0; 32];
+    let mut iv: [u8; 12] = [0; 12];
+    k.copy_from_slice(&key[..32]);
+    iv.copy_from_slice(&key[32..44]);
+
+    ChaCha20::new(&k.into(), &iv.into())
 }
 
 pub struct Encrypted<I> {

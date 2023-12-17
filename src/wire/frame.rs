@@ -1,8 +1,11 @@
 use binary_layout::prelude::*;
+use chacha20::ChaCha20;
 use secp256k1::constants;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{Error, Result};
+
+use super::encrypt::{chacha_from_key, SharedKey};
 
 const MAGIC: u32 = 0x6469676c;
 const VERSION: u8 = 1;
@@ -112,22 +115,6 @@ pub struct Frame {
     pub id: u32,
 }
 
-// impl Frame {
-//     pub fn payload_into_string(&self) -> String {
-//         match self.payload {
-//             None => String::default(),
-//             Some(data) => String::from_utf8_lossy(data).into_owned(),
-//         }
-//     }
-
-//     pub fn payload_into_vec(&self) -> Vec<u8> {
-//         match self.payload {
-//             None => Vec::default(),
-//             Some(data) => data.into(),
-//         }
-//     }
-// }
-
 #[async_trait::async_trait]
 pub trait FrameWriter {
     async fn write<W>(
@@ -147,15 +134,16 @@ pub trait FrameReader {
         R: AsyncRead + Unpin + Send;
 }
 
-#[derive(Clone)]
 pub struct FrameReaderHalf {
     buffer: [u8; MAX_PAYLOAD_SIZE],
+    chacha: ChaCha20,
 }
 
 impl FrameReaderHalf {
-    pub fn new() -> Self {
+    pub fn new(key: &SharedKey) -> Self {
         Self {
             buffer: [0; MAX_PAYLOAD_SIZE],
+            chacha: chacha_from_key(key),
         }
     }
 }
@@ -190,15 +178,16 @@ impl FrameReader for FrameReaderHalf {
     }
 }
 
-#[derive(Clone)]
 pub struct FrameWriterHalf {
     header: [u8; FRAME_HEADER_SIZE],
+    chacha: ChaCha20,
 }
 
 impl FrameWriterHalf {
-    pub fn new() -> Self {
+    pub fn new(key: &SharedKey) -> Self {
         Self {
             header: [0; FRAME_HEADER_SIZE],
+            chacha: chacha_from_key(key),
         }
     }
 }
@@ -232,17 +221,16 @@ impl FrameWriter for FrameWriterHalf {
     }
 }
 
-#[derive(Clone)]
 pub struct FrameStream {
     read_half: FrameReaderHalf,
     write_half: FrameWriterHalf,
 }
 
 impl FrameStream {
-    pub fn new() -> FrameStream {
+    pub fn new(key: &SharedKey) -> FrameStream {
         Self {
-            read_half: FrameReaderHalf::new(),
-            write_half: FrameWriterHalf::new(),
+            read_half: FrameReaderHalf::new(key),
+            write_half: FrameWriterHalf::new(key),
         }
     }
 

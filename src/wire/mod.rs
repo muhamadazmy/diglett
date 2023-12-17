@@ -12,7 +12,7 @@ use tokio::{
 };
 
 use self::{
-    encrypt::shared,
+    encrypt::{shared, SharedKey},
     frame::{Frame, FrameReaderHalf, FrameWriterHalf, Kind},
 };
 pub use types::{Registration, Stream};
@@ -53,9 +53,9 @@ where
             PublicKey::from_slice(&frame::read_handshake(&mut self.inner, &mut buf).await?)?;
 
         // compute shared
-        let _shared = encrypt::shared(&self.kp, server_pk);
+        let shared = encrypt::shared(&self.kp, server_pk);
 
-        Ok(Connection::new(self.inner))
+        Ok(Connection::new(self.inner, &shared))
     }
 }
 
@@ -83,9 +83,9 @@ where
         frame::write_handshake(&mut self.inner, &mut buf, self.kp.public_key().serialize()).await?;
 
         // compute shared
-        let _shared = shared(&self.kp, client_pk);
+        let shared = shared(&self.kp, client_pk);
 
-        Ok(Connection::new(self.inner))
+        Ok(Connection::new(self.inner, &shared))
     }
 }
 
@@ -130,10 +130,10 @@ pub struct Connection<S, FrameStream> {
 impl<S> Connection<S, FrameStream> {
     // this is private because only client or server should
     // be able to create it
-    fn new(stream: S) -> Self {
+    fn new(stream: S, key: &SharedKey) -> Self {
         Connection {
             inner: stream,
-            frame: FrameStream::new(),
+            frame: FrameStream::new(key),
         }
     }
 }
