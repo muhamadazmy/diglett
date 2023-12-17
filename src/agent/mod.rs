@@ -16,7 +16,7 @@ use tokio::{
 
 pub async fn login<T: Into<String>, S>(client: &mut Connection<S>, token: T) -> Result<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     // we only expose the possibility to register one name, but this can easily changed
     // in the future to enable more. but right now we can forward one port per agent
@@ -27,7 +27,7 @@ where
 
 pub async fn register<N: Into<String>, S>(client: &mut Connection<S>, name: N) -> Result<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     // we only expose the possibility to register one name, but this can easily changed
     // in the future to enable more. but right now we can forward one port per agent
@@ -42,7 +42,7 @@ async fn register_one<N: Into<String>, S>(
     name: N,
 ) -> Result<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     client
         .control(Control::Register {
@@ -164,7 +164,7 @@ async fn upstream<W>(
     server_writer: Arc<Mutex<Connection<W>>>,
 ) -> Result<()>
 where
-    W: AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin + Send,
 {
     let mut buf: [u8; wire::MAX_PAYLOAD_SIZE] = [0; wire::MAX_PAYLOAD_SIZE];
     loop {

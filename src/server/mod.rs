@@ -296,7 +296,7 @@ where
 
 async fn downstream<W>(id: Stream, mut down: OwnedReadHalf, writer: AgentWriter<W>) -> Result<()>
 where
-    W: AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin + Send,
 {
     let mut buf: [u8; wire::MAX_PAYLOAD_SIZE] = [0; wire::MAX_PAYLOAD_SIZE];
 

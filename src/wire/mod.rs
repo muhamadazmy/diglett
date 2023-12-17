@@ -10,7 +10,7 @@ use tokio::{
 
 use self::{
     encrypt::shared,
-    frame::{Frame, FrameStream, Kind},
+    frame::{Frame, FrameReader, FrameStream, FrameWriter, Kind},
 };
 pub use types::{Registration, Stream};
 
@@ -137,7 +137,7 @@ impl<S> Connection<S> {
 
 impl<S> Connection<S>
 where
-    S: AsyncWrite + Unpin,
+    S: AsyncWrite + Unpin + Send,
 {
     // send a control message to remote side
     pub async fn control(&mut self, ctl: Control) -> Result<()> {
@@ -219,7 +219,7 @@ where
 
 impl<S> Connection<S>
 where
-    S: AsyncRead + Unpin,
+    S: AsyncRead + Unpin + Send,
 {
     pub async fn read(&mut self) -> Result<Message> {
         let frm = self.frame.read(&mut self.inner).await?;
