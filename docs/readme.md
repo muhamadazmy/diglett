@@ -1,44 +1,78 @@
-# Diglett
+# Wire protocol
 
-Diglett lets you expose your locally running web server via a public URL.
+![wire-protocol](img/wire.png)
 
-Diglett does it as follows:
+The diagram above gives a quick overview of what happens on the wire when a diglett client connects to the server.
 
-- You need to run a diglett agent on the same private network as your workload
-- `diglett` connects to a public `diglett server`
-- the agent initiate a handshake to exchange keys, and send configuration including what (sub)domain it needs to configure
-  - (authorization) is to grantee agent connection is allowed to use this subdomain
-- once the handshake is established the server does the following:
-  - listen on a random tcp port (called agent port) usually listens on the localhost. This port then is associated with an agent connection
-  - Connection(s) to agent ports are multiplexed over the agent connection according to the wire protocol specifications
-  - A custom configuration module is invoked according to server config, this can be as simple as executing an external script
-  - The script can for example configure traefik to proxy to do tls termination for that specific domain, and forward traffic to the local listen port
-  - If agent connection is terminated, the configuration is cleaned up (for example delete the traefik configuration)
+Next we will explain the format of each frame that goes over the wire.
 
-Diglett is a **tcp** proxy that allows running workloads (servers) behind NAT. It have no assumption of the protocol going over the wire. Hence for this to work as an http/https proxy you will still need to run the diglett server behind a proxy like traefik. Then set up traefik config for each connected agent using the proper configuration module or script.
+## Handshake
 
-The agent can forward a single port only, for multiple ports you will have to run separate instances
+The handshake frame is built as follows
 
-## Technical specifications
+| magic | version | key |
+|-------|---------|-----|
+| 4 bytes| 1 byte | 33 bytes |
 
-### Wire protocol
+- The `magic` is a 4 bytes that always carries the value `0x6469676c` is used to identify that this a valid diglett connection.
+- The `version` is a 1 byte that is set for `0x01` for now (version 1). This might change in the future if needed.
+- The `key` segment is a 33 bytes long section that carries the `Public Key` of the handshake sender. This key is always a `Secp256k1` public key.
 
-- On connect, the agent will send a handshake initiate message
-- The message contains the agent public key (secp256k1), this is randomly generated on agent start
-- The server public key should be public and should be available at `/info` this contains information about the server
-  including it's version, hex encoded public key and may be other meta data.
-- Once the server receives the agent public key in the handshake, a shared key is generated using `ecdh` algorithm.
-- The shared key will be used to encrypt/decrypt the full stream from now on with `chacha20` stream encryption algorithm
-- Following this point, all data on the stream is encrypted in both ways
-- The agent immediately sends its required configuration this include:
-  - the subdomain requested by the agent
-  - extra configuration for gateway (tbd)
-- server then can send `<stream>` message that contains the following data:
-  - client port number (local to the server)
-  - type of message
-  - size of payload (can be 0)
-  - the message is immediately followed by the payload
-- when received, the agent will match the client number (used as connection id) to an already esablished connection to backend. if not a new connection is open and mapped to that id
-  data is written on the wire (if any)
-- the agent will do the same if any data is received from the backend
-- server decrypt and forward the data back
+### Handshake process
+
+When the client connects, it starts by sending a handshake frame as defined before. The server replies immediately by sending back also a handshake frame but carries the server
+public key instead.
+
+The moment the handshake response is received, both the client and the server agree to a shared key using `ecdh` algorithm. The `shared key` generated is used from this point forward
+to encrypt the traffic (both ways) using the `chacha20` symmetric encryption algorithm.
+
+> NOTE: because the client and server exchange keys on the wire, there is no way to validate the server identity hence the system can be prone to `man in the middle` attacks. This can change
+in the future to fetch server public key over **https** only.
+
+## Control/Data frame
+
+After the handshake the wire will only use ONE frame format which is as follows
+|kind| id | size | payload |
+|----|----|------|---------|
+| 1 byte | 4 bytes | 2 bytes | variable size |
+
+- the `kind` is one byte, more details on this later.
+- the `id` is a 4 bytes identification of the frame. The id itself is split into 2 parts
+  - `registration` is the id of the registration that this frame belongs to (as per the registration step above in the sequence diagram)
+  - `stream` is the id of the `open connection` which identifies one client connection to the `backend` service.
+  - This means that the `id` is not unique because many frames can still belong to the same client connection
+- the `size` is 2 bytes which is the size of the payload. this can be `0` for most control frames.
+
+### Frame Kind
+
+Kind tells the server and the client what kind of payload is carried by this frame. Currently we have those kinds
+
+- Ok = 0, is a response to a previous control message that donates success
+- Error = 1, is a response to a previous control message that donates failure, the payload then carries the error message
+- Register = 2, is a `register` request as per the sequence diagram. The `id` then carries only the registration id in the higher order 2 bytes. The payload then carries the name.
+- FinishRegister = 3, as per the sequence diagram this need to be sent after all registration messages. no payload
+- Payload = 4, carries actual stream data for clients, the id in this case always carries a unique ID that identifies this client connection the ID is constructed to that it holds (registration, port number) of the client that makes 4 bytes in total
+- Close = 5, close a stream, the id then holds the stream (client connection) to close
+- Terminate = 6, terminate should terminate the agent, has no payload, also is never used in code so far
+- Login = 7, login request as per the sequence diagram, payload then carries the token
+
+> Note: after sending `finish-registration` all following frames on both directions on the wire can only be `payload` or `close` frames.
+
+## So how does this works
+
+If you understand the description of the wire protocol above, then the operation of the server and client becomes simple and it goes as follows:
+
+- client initiate connection, they exchange keys, and start an encrypted stream.
+- client login, by sending a token
+- server reply with OK, or Error in case authentication error
+- client send a register (id, name) we only support one register call for now. Id is normally 0, name is the name of the subdomain to register
+- server reply with OK, or Error in case of authorization error
+- once client send registration finish, the server then start listening on a random port. (for each registration) we call this `listen port` from now on
+  - the `listening port` connections are basically forwarded (multiplexed) over the agent connection to agent side
+- when a client connects to the `listen port` and have local port as know as `client socket` and start writing data, a payload frame(s) are sent with the data to the agent.
+  - all data coming from the `client` will be of `payload` kind, and `id` as `(<registration>, <local socket>)` this will be the frame id. for example `0x00008269` where registration id is 0 and `client socket` is `33385`
+  - that ID from now on is called `stream id`
+- when the agent receive a `payload` of an unknown id. A new connection is established to the backend. the connection is then mapped to the stream id.
+- the agent also takes care of copying any data over from that backend connection to the server. using the same `stream id`.
+- when the server receives any `payload` frame from the agent with that stream id the data is written back to the `client socket`.
+- If any of the sides loses the open socket for that stream, a control `close` type is send to the other end so it makes sure the connection is closed and cleaned up.

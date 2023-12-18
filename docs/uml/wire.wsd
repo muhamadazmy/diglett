@@ -1,0 +1,32 @@
+@startuml
+header Wire Ptocol
+
+participant Client as client
+participant Server as server
+
+client -> server: TCP connection
+client -> server: Handshake (send client pk)
+server -> client: Handshake (send server pk)
+...
+note over client, server
+After key exchange the connection is
+encryted in both ways using chacha20
+end note
+client -> server: Login (with token)
+server -> client: send Ok or Error
+loop N times
+client -> server: Register (id, name)
+server -> client: send Ok or Error
+end
+note right
+wire protcol supports multiple name
+registrations on the same connection
+but we hard fixed it to one for now.
+end note
+client -> server: Finish Registration
+...
+loop forever
+server -> client: copy connections (multiplexed)
+client -> server: copy connectinos (multiplexed)
+end
+@enduml
