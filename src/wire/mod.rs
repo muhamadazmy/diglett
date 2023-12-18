@@ -20,7 +20,7 @@ pub use types::{Registration, Stream};
 mod encrypt;
 mod frame;
 
-pub use encrypt::{keypair, Encrypted};
+pub use encrypt::keypair;
 pub use frame::{FrameReader, FrameStream, FrameWriter, MAX_PAYLOAD_SIZE};
 
 define_layout!(handshake, BigEndian, {

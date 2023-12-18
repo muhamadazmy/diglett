@@ -1,11 +1,10 @@
 use binary_layout::prelude::*;
-use chacha20::{cipher::StreamCipher, ChaCha20};
 use secp256k1::constants;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{Error, Result};
 
-use super::encrypt::{chacha_from_key, SharedKey};
+use super::encrypt::{decryptor_from_key, encryptor_from_key, CipherCtx, SharedKey};
 
 const MAGIC: u32 = 0x6469676c;
 const VERSION: u8 = 1;
@@ -136,14 +135,14 @@ pub trait FrameReader {
 
 pub struct FrameReaderHalf {
     buffer: [u8; MAX_PAYLOAD_SIZE],
-    chacha: ChaCha20,
+    chacha: CipherCtx,
 }
 
 impl FrameReaderHalf {
     pub fn new(key: &SharedKey) -> Self {
         Self {
             buffer: [0; MAX_PAYLOAD_SIZE],
-            chacha: chacha_from_key(key),
+            chacha: decryptor_from_key(key).unwrap(),
         }
     }
 }
@@ -158,7 +157,7 @@ impl FrameReader for FrameReaderHalf {
         reader.read_exact(header).await?;
 
         // decrypt
-        self.chacha.apply_keystream(header);
+        self.chacha.cipher_update_inplace(header, header.len())?;
 
         let view = frame::View::new(header);
         let kind: Kind = view
@@ -175,7 +174,7 @@ impl FrameReader for FrameReaderHalf {
             let data = &mut self.buffer[..size];
 
             reader.read_exact(data).await?;
-            self.chacha.apply_keystream(data);
+            self.chacha.cipher_update_inplace(data, data.len())?;
 
             Some(data as &[u8])
         };
@@ -186,14 +185,14 @@ impl FrameReader for FrameReaderHalf {
 
 pub struct FrameWriterHalf {
     header: [u8; FRAME_HEADER_SIZE],
-    chacha: ChaCha20,
+    chacha: CipherCtx,
 }
 
 impl FrameWriterHalf {
     pub fn new(key: &SharedKey) -> Self {
         Self {
             header: [0; FRAME_HEADER_SIZE],
-            chacha: chacha_from_key(key),
+            chacha: encryptor_from_key(key).unwrap(),
         }
     }
 }
@@ -219,10 +218,11 @@ impl FrameWriter for FrameWriterHalf {
         }
 
         // encrypt header
-        self.chacha.apply_keystream(&mut self.header[..]);
+        self.chacha
+            .cipher_update_inplace(&mut self.header[..], FRAME_HEADER_SIZE)?;
         writer.write_all(&self.header[..]).await?;
         if let Some(data) = payload {
-            self.chacha.apply_keystream(data);
+            self.chacha.cipher_update_inplace(data, data.len())?;
             writer.write_all(data).await?;
         }
 

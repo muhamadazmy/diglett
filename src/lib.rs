@@ -24,8 +24,14 @@ pub enum Error {
     #[error("authentication error: {0}")]
     AuthenticationError(String),
 
-    #[error("encryption error: {0}")]
+    #[error("key exchange error: {0}")]
     Encryption(#[from] secp256k1::Error),
+
+    #[error("openssl error: {0}")]
+    OpenSSLError(#[from] openssl::error::Error),
+
+    #[error("openssl error stack : {0}")]
+    OpenSSLErrorStack(#[from] openssl::error::ErrorStack),
 
     #[error("io error: {0}")]
     IO(#[from] std::io::Error),
