@@ -1,14 +1,18 @@
 use std::{collections::HashMap, io::ErrorKind, sync::Arc};
 
 use crate::{
-    wire::{self, Connection, Control, Message, Stream},
+    wire::{self, Connection, Control, FrameReader, FrameWriter, Message, Stream},
     Error, Result,
 };
-use tokio::net::{
-    tcp::{OwnedReadHalf, OwnedWriteHalf},
-    TcpListener, TcpStream, ToSocketAddrs,
+use secp256k1::Keypair;
+use tokio::{io::AsyncRead, sync::Mutex};
+use tokio::{
+    io::AsyncWrite,
+    net::{
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+        TcpListener, TcpStream, ToSocketAddrs,
+    },
 };
-use tokio::sync::Mutex;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     task::JoinHandle,
@@ -27,6 +31,7 @@ where
     A: Authenticate,
     R: Registerer,
 {
+    kp: Keypair,
     auth: Arc<A>,
     reg: Arc<R>,
 }
@@ -36,8 +41,9 @@ where
     A: Authenticate,
     R: Registerer,
 {
-    pub fn new(auth: A, registerer: R) -> Self {
+    pub fn new(kp: Keypair, auth: A, registerer: R) -> Self {
         Self {
+            kp,
             auth: Arc::new(auth),
             reg: Arc::new(registerer),
         }
@@ -50,9 +56,10 @@ where
             // serve one agent
             let auth = Arc::clone(&self.auth);
             let reg = Arc::clone(&self.reg);
+            let kp = self.kp;
             tokio::spawn(async move {
-                if let Err(err) = handle_agent(auth, reg, socket).await {
-                    log::trace!("failed to handle agent connection: {}", err);
+                if let Err(err) = handle_agent(kp, auth, reg, socket).await {
+                    log::error!("failed to handle agent connection: {}", err);
                 }
             });
         }
@@ -62,11 +69,12 @@ where
 }
 
 async fn handle_agent<A: Authenticate, R: Registerer>(
+    kp: Keypair,
     auth: Arc<A>,
     reg: Arc<R>,
     stream: TcpStream,
 ) -> Result<()> {
-    let server = wire::Server::new(stream);
+    let server = wire::Server::new(stream, kp);
     // upgrade connection
     // this step accept client negotiation (if correct)
     // and then use the connection to forward traffic from now on
@@ -155,7 +163,7 @@ async fn handle_agent<A: Authenticate, R: Registerer>(
 
     let (agent_reader, agent_writer) = connection.split();
 
-    let agent_writer: AgentWriter = Arc::new(Mutex::new(agent_writer));
+    let agent_writer = Arc::new(Mutex::new(agent_writer));
     // up map is a map of streams and their write halfs
     // it's used to write data sent from the agent up
     let clients: Clients = Arc::new(Mutex::new(HashMap::default()));
@@ -222,7 +230,7 @@ async fn handle_agent<A: Authenticate, R: Registerer>(
     Ok(())
 }
 
-type AgentWriter = Arc<Mutex<Connection<OwnedWriteHalf>>>;
+type AgentWriter<W, F> = Arc<Mutex<Connection<W, F>>>;
 type Clients = Arc<Mutex<HashMap<Stream, Client>>>;
 
 struct Client {
@@ -237,14 +245,26 @@ impl Drop for Client {
 }
 // upstream de multiplex incoming traffic from the agent to the clients
 // that are connected locally
-async fn upstream(
+async fn upstream<R, F>(
     streams: Clients,
-    mut reader: Connection<OwnedReadHalf>,
-) -> tokio::sync::mpsc::Receiver<()> {
+    mut reader: Connection<R, F>,
+) -> tokio::sync::mpsc::Receiver<()>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    F: FrameReader + Send + Sync + 'static,
+{
     let (close, notify) = tokio::sync::mpsc::channel::<()>(1);
 
     tokio::spawn(async move {
-        while let Ok(message) = reader.read().await {
+        loop {
+            let message = match reader.read().await {
+                Ok(message) => message,
+                Err(err) => {
+                    log::error!("failed to read stream from agent: {}", err);
+                    break;
+                }
+            };
+
             match message {
                 Message::Terminate => return,
                 Message::Payload { id, data } => {
@@ -278,7 +298,15 @@ async fn upstream(
     notify
 }
 
-async fn downstream(id: Stream, mut down: OwnedReadHalf, writer: AgentWriter) -> Result<()> {
+async fn downstream<W, F>(
+    id: Stream,
+    mut down: OwnedReadHalf,
+    writer: AgentWriter<W, F>,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin + Send,
+    F: FrameWriter,
+{
     let mut buf: [u8; wire::MAX_PAYLOAD_SIZE] = [0; wire::MAX_PAYLOAD_SIZE];
 
     loop {
@@ -293,7 +321,7 @@ async fn downstream(id: Stream, mut down: OwnedReadHalf, writer: AgentWriter) ->
             return Ok(());
         }
         log::trace!("forwarding [{}] of data to [{}]", n, id);
-        writer.lock().await.write(id, &buf[..n]).await?;
+        writer.lock().await.write(id, &mut buf[..n]).await?;
     }
 }
 

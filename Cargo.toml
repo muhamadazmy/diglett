@@ -19,12 +19,17 @@ path = "src/bins/server.rs"
 [dependencies]
 tokio = {version = "1", features=["rt-multi-thread", "macros", "io-util", "net", "sync"]}
 binary-layout = "3.2"
-secp256k1 = "0.28"
+secp256k1 = { version = "0.28", features=["rand-std", "hashes-std"] }
 thiserror = "1"
 log = "0.4"
 simple_logger = "4.3"
 clap = {version = "4.4", features=["derive"]}
 async-trait = "0.1"
+sha2 = "0.10"
+openssl = {version = "0.10", features = ["vendored"] }
 
 [build-dependencies]
 git-version = "0.3"
+
+[dev-dependencies]
+tokio = {version = "1", features=["full"]}

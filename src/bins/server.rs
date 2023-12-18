@@ -1,6 +1,7 @@
 use clap::{ArgAction, Parser};
 use diglett::{
     server::{AuthorizeAll, PrintRegisterer, Server},
+    wire::keypair,
     Result,
 };
 
@@ -39,7 +40,8 @@ async fn main() -> Result<()> {
 }
 
 async fn app(args: Args) -> Result<()> {
-    let server = Server::new(AuthorizeAll, PrintRegisterer);
+    let kp = keypair();
+    let server = Server::new(kp, AuthorizeAll, PrintRegisterer);
 
     server.start(args.listen).await
 }

@@ -2,84 +2,90 @@ use std::fmt::Display;
 
 use crate::{Error, Result};
 use binary_layout::prelude::*;
-use secp256k1::constants;
+use secp256k1::{constants, Keypair, PublicKey};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     net::{
         tcp::{OwnedReadHalf, OwnedWriteHalf},
         TcpStream,
     },
 };
 
-use self::frame::{Frame, Kind};
+use self::{
+    encrypt::{shared, SharedKey},
+    frame::{Frame, FrameReaderHalf, FrameWriterHalf, Kind},
+};
 pub use types::{Registration, Stream};
 
+mod encrypt;
 mod frame;
 
-const MAGIC: u32 = 0x6469676c;
-const VERSION: u8 = 1;
-const HANDSHAKE_SIZE: usize = 38;
-
-pub use frame::MAX_PAYLOAD_SIZE;
+pub use encrypt::keypair;
+pub use frame::{FrameReader, FrameStream, FrameWriter, MAX_PAYLOAD_SIZE};
 
 define_layout!(handshake, BigEndian, {
     magic: u32,
     version: u8,
     key: [u8; constants::PUBLIC_KEY_SIZE],
-    // todo: add token here
 });
 
 pub struct Client<S> {
     inner: S,
+    kp: Keypair,
 }
 
 impl<S> Client<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    pub fn new(stream: S) -> Self {
-        Client { inner: stream }
+    pub fn new(stream: S, kp: Keypair) -> Self {
+        Client { inner: stream, kp }
     }
 
-    pub async fn negotiate(mut self) -> Result<Connection<S>> {
-        let mut buf: [u8; HANDSHAKE_SIZE] = [0; HANDSHAKE_SIZE];
-        let mut view = handshake::View::new(&mut buf);
-        view.magic_mut().write(MAGIC);
-        view.version_mut().write(VERSION);
-        self.inner.write_all(&buf).await?;
+    pub async fn negotiate(mut self) -> Result<Connection<S, FrameStream>> {
+        let mut buf: [u8; frame::HANDSHAKE_SIZE] = [0; frame::HANDSHAKE_SIZE];
 
-        self.inner.flush().await?;
-        // fall into encryption directly or wait for okay?
-        Ok(Connection::new(self.inner))
+        // send the handshake request with self public key
+        frame::write_handshake(&mut self.inner, &mut buf, self.kp.public_key().serialize()).await?;
+
+        // read the server handshake and extract public key of server
+        let server_pk =
+            PublicKey::from_slice(&frame::read_handshake(&mut self.inner, &mut buf).await?)?;
+
+        // compute shared
+        let shared = encrypt::shared(&self.kp, server_pk);
+
+        Ok(Connection::new(self.inner, &shared))
     }
 }
 
 pub struct Server<S> {
     inner: S,
+    kp: Keypair,
 }
 
 impl<S> Server<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    pub fn new(stream: S) -> Self {
-        Server { inner: stream }
+    pub fn new(stream: S, kp: Keypair) -> Self {
+        Server { inner: stream, kp }
     }
 
-    pub async fn accept(mut self) -> Result<Connection<S>> {
-        let mut buf: [u8; HANDSHAKE_SIZE] = [0; HANDSHAKE_SIZE];
-        self.inner.read_exact(&mut buf).await?;
-        let view = handshake::View::new(&buf);
-        if view.magic().read() != MAGIC {
-            return Err(Error::InvalidMagic);
-        }
+    pub async fn accept(mut self) -> Result<Connection<S, FrameStream>> {
+        let mut buf: [u8; frame::HANDSHAKE_SIZE] = [0; frame::HANDSHAKE_SIZE];
 
-        let version = view.version().read();
-        if version != VERSION {
-            return Err(Error::InvalidVersion(version));
-        }
+        // read client handshake request and extract client public key
+        let client_pk =
+            PublicKey::from_slice(&frame::read_handshake(&mut self.inner, &mut buf).await?)?;
 
-        Ok(Connection::new(self.inner))
+        // send server handshake request with self public key
+        frame::write_handshake(&mut self.inner, &mut buf, self.kp.public_key().serialize()).await?;
+
+        // compute shared
+        let shared = shared(&self.kp, client_pk);
+
+        Ok(Connection::new(self.inner, &shared))
     }
 }
 
@@ -116,64 +122,81 @@ impl Message {
     }
 }
 
-pub struct Connection<S> {
+pub struct Connection<S, FrameStream> {
     inner: S,
-    header_buf: [u8; frame::FRAME_HEADER_SIZE],
-    data_buf: [u8; frame::MAX_PAYLOAD_SIZE],
+    frame: FrameStream,
 }
 
-impl<S> Connection<S> {
+impl<S> Connection<S, FrameStream> {
     // this is private because only client or server should
     // be able to create it
-    fn new(stream: S) -> Self {
+    fn new(stream: S, key: &SharedKey) -> Self {
         Connection {
             inner: stream,
-            header_buf: [0; frame::FRAME_HEADER_SIZE],
-            data_buf: [0; frame::MAX_PAYLOAD_SIZE],
+            frame: FrameStream::new(key),
         }
     }
 }
 
-impl<S> Connection<S>
+impl<S, F> Connection<S, F>
 where
-    S: AsyncWrite + Unpin,
+    S: AsyncWrite + Unpin + Send,
+    F: FrameWriter,
 {
     // send a control message to remote side
     pub async fn control(&mut self, ctl: Control) -> Result<()> {
-        let frm = match &ctl {
-            Control::Ok => Frame {
-                kind: Kind::Ok,
-                id: 0,
-                payload: None,
-            },
-            Control::Error(msg) => Frame {
-                kind: Kind::Error,
-                id: 0,
-                payload: Some(msg.as_bytes()),
-            },
-            Control::Register { id, name } => Frame {
-                kind: Kind::Register,
-                id: id.into(),
-                payload: Some(name.as_bytes()),
-            },
-            Control::FinishRegister => Frame {
-                kind: Kind::FinishRegister,
-                id: 0,
-                payload: None,
-            },
-            Control::Close { id } => Frame {
-                kind: Kind::Close,
-                id: id.into(),
-                payload: None,
-            },
-            Control::Login(token) => Frame {
-                kind: Kind::Login,
-                id: 0,
-                payload: Some(token.as_bytes()),
-            },
+        let (frm, mut payload) = match ctl {
+            Control::Ok => (
+                Frame {
+                    kind: Kind::Ok,
+                    id: 0,
+                },
+                None,
+            ),
+            Control::Error(msg) => (
+                Frame {
+                    kind: Kind::Error,
+                    id: 0,
+                },
+                Some(msg),
+            ),
+            Control::Register { id, name } => (
+                Frame {
+                    kind: Kind::Register,
+                    id: (&id).into(),
+                },
+                Some(name),
+            ),
+            Control::FinishRegister => (
+                Frame {
+                    kind: Kind::FinishRegister,
+                    id: 0,
+                },
+                None,
+            ),
+            Control::Close { id } => (
+                Frame {
+                    kind: Kind::Close,
+                    id: id.into(),
+                },
+                None,
+            ),
+            Control::Login(token) => (
+                Frame {
+                    kind: Kind::Login,
+                    id: 0,
+                },
+                Some(token),
+            ),
         };
 
-        frame::write(&mut self.inner, &mut self.header_buf, frm).await?;
+        self.frame
+            .write(
+                &mut self.inner,
+                frm,
+                payload.as_deref_mut().map(|v| unsafe { v.as_bytes_mut() }),
+            )
+            .await?;
 
         self.inner.flush().await.map_err(Error::IO)
     }
@@ -193,51 +216,52 @@ where
     /// again until all data is written. It's important that if a lock
     /// is acquired that u give a chance for other writers a chance to
     /// do a write as well.
-    pub async fn write(&mut self, id: Stream, data: &[u8]) -> Result<usize> {
+    pub async fn write(&mut self, id: Stream, data: &mut [u8]) -> Result<usize> {
         let data = if data.len() > frame::MAX_PAYLOAD_SIZE {
-            &data[..frame::MAX_PAYLOAD_SIZE]
+            &mut data[..frame::MAX_PAYLOAD_SIZE]
         } else {
             data
         };
 
-        frame::write(
-            &mut self.inner,
-            &mut self.header_buf,
-            Frame {
-                kind: frame::Kind::Payload,
-                id: id.into(),
-                payload: Some(data),
-            },
-        )
-        .await?;
+        self.frame
+            .write(
+                &mut self.inner,
+                Frame {
+                    kind: frame::Kind::Payload,
+                    id: id.into(),
+                },
+                Some(data),
+            )
+            .await?;
         self.inner.flush().await?;
 
         Ok(data.len())
     }
 }
 
-impl<S> Connection<S>
+impl<S, F> Connection<S, F>
 where
-    S: AsyncRead + Unpin,
+    S: AsyncRead + Unpin + Send,
+    F: FrameReader,
 {
     pub async fn read(&mut self) -> Result<Message> {
-        let frm = frame::read(&mut self.inner, &mut self.data_buf).await?;
+        let (frm, payload) = self.frame.read(&mut self.inner).await?;
 
         let msg = match frm.kind {
             Kind::Ok => Message::Control(Control::Ok),
-            Kind::Error => Message::Control(Control::Error(frm.payload_into_string())),
+            Kind::Error => Message::Control(Control::Error(option_to_str(payload))),
             Kind::Close => Message::Control(Control::Close { id: frm.id.into() }),
             Kind::Register => Message::Control(Control::Register {
                 id: Registration::from(frm.id as u16),
-                name: frm.payload_into_string(),
+                name: option_to_str(payload),
             }),
             Kind::FinishRegister => Message::Control(Control::FinishRegister),
             Kind::Terminate => Message::Terminate,
-            Kind::Login => Message::Control(Control::Login(frm.payload_into_string())),
+            Kind::Login => Message::Control(Control::Login(option_to_str(payload))),
             Kind::Payload => Message::Payload {
                 id: frm.id.into(),
                 // todo: no copy?
-                data: frm.payload_into_vec(),
+                data: option_to_vec(payload),
             },
         };
 
@@ -245,21 +269,39 @@ where
     }
 }
 
-impl Connection<TcpStream> {
-    pub fn split(self) -> (Connection<OwnedReadHalf>, Connection<OwnedWriteHalf>) {
+impl Connection<TcpStream, FrameStream> {
+    pub fn split(
+        self,
+    ) -> (
+        Connection<OwnedReadHalf, FrameReaderHalf>,
+        Connection<OwnedWriteHalf, FrameWriterHalf>,
+    ) {
+        let (fread, fwrite) = self.frame.split();
         let (read, write) = self.inner.into_split();
         (
             Connection {
                 inner: read,
-                data_buf: self.data_buf,
-                header_buf: self.header_buf,
+                frame: fread,
             },
             Connection {
                 inner: write,
-                data_buf: [0; frame::MAX_PAYLOAD_SIZE],
-                header_buf: [0; frame::FRAME_HEADER_SIZE],
+                frame: fwrite,
             },
         )
+    }
+}
+
+fn option_to_str(opt: Option<&'_ [u8]>) -> String {
+    match opt {
+        None => String::default(),
+        Some(data) => String::from_utf8_lossy(data).into_owned(),
+    }
+}
+
+fn option_to_vec(opt: Option<&'_ [u8]>) -> Vec<u8> {
+    match opt {
+        None => Vec::default(),
+        Some(data) => Vec::from(data),
     }
 }
 
@@ -348,6 +390,9 @@ mod test {
 
     #[tokio::test]
     async fn test_negotiate() {
+        let server_key = keypair();
+        let client_key = keypair();
+
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
@@ -355,7 +400,7 @@ mod test {
 
         let handler: JoinHandle<Result<()>> = tokio::spawn(async move {
             let (cl, _) = listener.accept().await.map_err(Error::IO)?;
-            let server = super::Server::new(cl);
+            let server = super::Server::new(cl, server_key);
             let mut con = server.accept().await?;
 
             let msg = con.read().await.unwrap();
@@ -389,10 +434,11 @@ mod test {
         let client = tokio::net::TcpStream::connect(("127.0.0.1", local.port()))
             .await
             .unwrap();
-        let client = super::Client::new(client);
+        let client = super::Client::new(client, client_key);
         let mut con = client.negotiate().await.unwrap();
 
-        con.write(Stream::from(20), "hello world".as_bytes())
+        let mut msg = String::from("hello world");
+        con.write(Stream::from(20), unsafe { msg.as_bytes_mut() })
             .await
             .unwrap();
         con.control(Control::Close {

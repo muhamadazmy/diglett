@@ -1,5 +1,9 @@
 use clap::{ArgAction, Parser};
-use diglett::{agent, wire::Client, Result};
+use diglett::{
+    agent,
+    wire::{keypair, Client},
+    Result,
+};
 use tokio::net::TcpStream;
 
 /// diglett gateway agent
@@ -48,13 +52,13 @@ async fn main() -> Result<()> {
 
 async fn app(args: Args) -> Result<()> {
     let connection = TcpStream::connect(args.gateway).await?;
-    let client = Client::new(connection);
+    let client = Client::new(connection, keypair());
 
     let mut client = client.negotiate().await?;
 
     agent::login(&mut client, args.token).await?;
     agent::register(&mut client, args.name).await?;
-    agent::serve(args.backend, client).await?;
+    agent::serve(client, args.backend).await?;
 
     Ok(())
 }
