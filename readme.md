@@ -42,6 +42,63 @@ The configuration step that happens on the server side to actually `expose` the 
 
 This will then be extended to actually configure the ingress proxy (for example `traefik`) to forward the domain to the local listening port on the server side
 
+## Building
+
+```bash
+cargo build --release --target=x86_64-unknown-linux-musl
+```
+
+You should then find the 2 binaries
+
+- target/x86_64-unknown-linux-musl/release/diglett
+- target/x86_64-unknown-linux-musl/release/diglett-server
+
+## Full Example
+
+We gonna run both the client and server locally
+
+In one terminal start the server
+
+```bash
+diglett-server -d
+```
+
+The `-d` is for debug messages
+
+In the other terminal start a simple python http server.
+
+```bash
+python -m http.server --directory . --bind :: 9000
+```
+
+This will start an http server in the current directory
+
+In yet a third terminal you need to start the diglett-agent
+
+```bash
+diglett -d -g localhost:20000  -n example -d localhost:9000
+```
+
+This will connect to the server at port 20000 and forward connections to backend at `localhost:9000` which is the python server in that case
+
+When you start the agent, you should see a message printed on the `server` terminal that shows
+
+```bash
+register domain 'example' -> '<some port number>'
+```
+
+This is basically the port on the server side that will be accept connections on your behalf (on the public network) and any connection will then
+be forwarded over the agent connection to your backend (the python server)
+
+Let's say the `port` in the previous example is `33605`. Now try to open your browser and type `localhost:33605` you then should be served the web page that is served by the python http server.
+
+What is happening is the following:
+
+- When the agent connected to the server the server opened a local port to accept connections on behalf of the agent
+- When someone connect to that port (33605 in the example above) the connection is forwarded over the agent connection to the agent
+- The agent then connects to the backend (the http server over port 9000) and pipe the traffic
+- Piping happens in the opposite direction as well
+
 ## Specifications
 
 Please check specifications and implementation details [here](docs/readme.md)
